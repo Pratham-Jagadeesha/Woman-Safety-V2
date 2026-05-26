@@ -1,0 +1,6 @@
+{
+  "name": "SafeHer",
+  "description": "SafeHer is a high-security emergency safety application for women. It features instant SOS alerts via SMS with precise live GPS tracking, a loud attention-grabbing siren alarm, an intelligent accelerometer-based shake detection, and customizable quick-dial emergency contacts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
