@@ -41,9 +41,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import java.util.Locale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -51,21 +48,24 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.mapbox.mapboxsdk.Mapbox
-import com.mapbox.mapboxsdk.maps.MapView
-import com.mapbox.mapboxsdk.maps.MapboxMap
-import com.mapbox.mapboxsdk.maps.Style
-import com.mapbox.mapboxsdk.geometry.LatLng
-import com.mapbox.mapboxsdk.annotations.Marker
-import com.mapbox.mapboxsdk.annotations.MarkerOptions
-import com.mapbox.mapboxsdk.annotations.Polyline
-import com.mapbox.mapboxsdk.annotations.PolylineOptions
-import com.mapbox.mapboxsdk.camera.CameraUpdateFactory
-import com.mapbox.mapboxsdk.camera.CameraPosition
-import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import org.maplibre.android.MapLibre
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.Style
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.annotations.MarkerOptions
+import org.maplibre.android.annotations.PolylineOptions
+import org.maplibre.android.annotations.PolygonOptions
+import org.maplibre.android.annotations.IconFactory
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.delay
 import com.example.data.Contact
 import com.example.data.Helpline
 import com.example.data.HelplinesAndTips
@@ -79,6 +79,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try {
+            org.maplibre.android.MapLibre.getInstance(this)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -1775,738 +1780,81 @@ fun calculatePath(start: MapPlace, end: MapPlace, avoidUnsafe: Boolean, unsafeZo
     return path
 }
 
+fun createColoredMarkerIcon(context: android.content.Context, color: Int): org.maplibre.android.annotations.Icon {
+    val size = 42
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val paint = Paint().apply {
+        isAntiAlias = true
+    }
+    paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(size / 2f, size / 2f, size / 2.2f, paint)
+    paint.color = color
+    canvas.drawCircle(size / 2f, size / 2f, size / 3.2f, paint)
+    return org.maplibre.android.annotations.IconFactory.getInstance(context).fromBitmap(bitmap)
+}
+
+fun getCirclePoints(lat: Double, lng: Double, radiusInMeters: Double): List<LatLng> {
+    val points = mutableListOf<LatLng>()
+    val numPoints = 24
+    val earthRadius = 6378137.0
+    val latRad = Math.toRadians(lat)
+    val lngRad = Math.toRadians(lng)
+    val dR = radiusInMeters / earthRadius
+    for (i in 0 until numPoints) {
+        val angle = 2 * Math.PI * i / numPoints
+        val pointLatRad = Math.asin(
+            Math.sin(latRad) * Math.cos(dR) +
+            Math.cos(latRad) * Math.sin(dR) * Math.cos(angle)
+        )
+        val pointLngRad = lngRad + Math.atan2(
+            Math.sin(angle) * Math.sin(dR) * Math.cos(latRad),
+            Math.cos(dR) - Math.sin(latRad) * Math.sin(pointLatRad)
+        )
+        points.add(LatLng(Math.toDegrees(pointLatRad), Math.toDegrees(pointLngRad)))
+    }
+    points.add(points[0])
+    return points
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     
-    // Core landmark places
-    val allPlaces = remember {
-        listOf(
-            MapPlace("My Current Location", 37.7749, -122.4194, 0.25f, 0.45f, "Place", "Coordinates based on GPS"),
-            MapPlace("Central Station", 37.7801, -122.4120, 0.15f, 0.15f, "Place", "Transit hub, high foot traffic"),
-            MapPlace("Downtown Plaza", 37.7725, -122.4080, 0.55f, 0.48f, "Place", "Commercial shopping corridor"),
-            MapPlace("Tech Park Campus", 37.7650, -122.4250, 0.22f, 0.78f, "Place", "Offices and research facility"),
-            MapPlace("Grand Library", 37.7780, -122.4180, 0.42f, 0.28f, "Place", "Public civic center square"),
-            MapPlace("SafeHer HQ", 37.7710, -122.4210, 0.35f, 0.62f, "Place", "Community security office"),
-            MapPlace("Metro Crossing", 37.7610, -122.4150, 0.75f, 0.85f, "Place", "Subway platform, illuminated 24/7"),
-            MapPlace("Oakwood Apartments", 37.7850, -122.4280, 0.82f, 0.12f, "Place", "Residential family zone"),
-            
-            // Emergencies
-            MapPlace("Northern Police Precinct", 37.7830, -122.4220, 0.62f, 0.22f, "Police", "Municipal Police Department (Station 4)"),
-            MapPlace("Central Police Station", 37.7712, -122.4100, 0.48f, 0.68f, "Police", "Safety hub & precinct HQ"),
-            MapPlace("Saint Jude Hospital", 37.7615, -122.4225, 0.28f, 0.88f, "Hospital", "24-Hour emergency unit & trauma center"),
-            MapPlace("SFC Emergency Health Center", 37.7760, -120.4040, 0.88f, 0.52f, "Hospital", "First-aid urgent clinic"),
-            MapPlace("Community Refuge Shelter", 37.7680, -122.4150, 0.44f, 0.51f, "Safe Haven", "Verified night-time safe corridor guardian"),
-            MapPlace("Westhaven Shelter Circle", 37.7815, -122.4310, 0.85f, 0.32f, "Safe Haven", "24/7 community safety refuge")
-        )
-    }
-
-    val unsafeZones = remember {
-        listOf(
-            UnsafeZone("Dimly-lit Alleyway", "Low municipal lighting and active construction zones", 0.48f, 0.38f, 0.10f),
-            UnsafeZone("Industrial Warehouse Zone", "Deserted commercial sector with low security presence", 0.68f, 0.70f, 0.12f)
-        )
-    }
-
-    var searchQuery by remember { mutableStateOf("") }
-    var startPlace by remember { mutableStateOf(allPlaces[0]) } // Current Location
-    var endPlace by remember { mutableStateOf(allPlaces[2]) } // Downtown Plaza
-    var avoidUnsafe by remember { mutableStateOf(true) }
-    var activeFilter by remember { mutableStateOf("ALL") } // "ALL", "POLICE", "HOSPITAL", "HAVEN"
-    var selectedLandmark by remember { mutableStateOf<MapPlace?>(null) }
-    var showSearchResults by remember { mutableStateOf(false) }
-
-    val filteredPlaces = remember(activeFilter, allPlaces) {
-        if (activeFilter == "ALL") allPlaces
-        else allPlaces.filter { 
-            when (activeFilter) {
-                "POLICE" -> it.category == "Police"
-                "HOSPITAL" -> it.category == "Hospital"
-                "HAVEN" -> it.category == "Safe Haven"
-                else -> true
-            }
-        }
-    }
-
-    val searchResults = remember(searchQuery, allPlaces) {
-        if (searchQuery.isBlank()) emptyList()
-        else {
-            allPlaces.filter { 
-                it.name.contains(searchQuery, ignoreCase = true) || 
-                it.category.contains(searchQuery, ignoreCase = true) ||
-                it.address.contains(searchQuery, ignoreCase = true)
-            }
-        }
-    }
-
-    // --- State for Live GPS Location ---
-    var localHasLocationPermission by remember {
+    var hasLocationPermission by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
         )
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        localHasLocationPermission = isGranted
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        hasLocationPermission = results[android.Manifest.permission.ACCESS_FINE_LOCATION] ?: hasLocationPermission
     }
 
-    var currentUserLocation by remember { mutableStateOf<LatLng?>(null) }
-    var followCurrentUser by remember { mutableStateOf(true) }
+    val locationHelper = remember { com.example.util.LocationHelper(context) }
+    var liveLocation by remember { mutableStateOf<android.location.Location?>(null) }
 
-    val locationListener = remember {
-        object : LocationListener {
-            override fun onLocationChanged(location: Location) {
-                currentUserLocation = LatLng(location.latitude, location.longitude)
-            }
-            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
-            override fun onProviderEnabled(provider: String) {}
-            override fun onProviderDisabled(provider: String) {}
-        }
-    }
-
-    val locationManager = remember { context.getSystemService(Context.LOCATION_SERVICE) as LocationManager }
-
-    LaunchedEffect(localHasLocationPermission) {
-        if (localHasLocationPermission) {
-            try {
-                val isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
-                val isNetworkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
-                val provider = when {
-                    isGpsEnabled -> LocationManager.GPS_PROVIDER
-                    isNetworkEnabled -> LocationManager.NETWORK_PROVIDER
-                    else -> null
+    LaunchedEffect(hasLocationPermission) {
+        if (hasLocationPermission) {
+            while (true) {
+                val loc = locationHelper.getCurrentLocation()
+                if (loc != null) {
+                    liveLocation = loc
                 }
-                if (provider != null) {
-                    val lastKnown = locationManager.getLastKnownLocation(provider)
-                    if (lastKnown != null) {
-                        currentUserLocation = LatLng(lastKnown.latitude, lastKnown.longitude)
-                    }
-                    locationManager.requestLocationUpdates(
-                        provider,
-                        3000L,
-                        2f,
-                        locationListener
-                    )
-                }
-            } catch (e: SecurityException) {
-                e.printStackTrace()
-            } catch (e: Exception) {
-                e.printStackTrace()
+                delay(10000)
             }
         }
     }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            try {
-                locationManager.removeUpdates(locationListener)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    // Path matched
-    val matchedPath = remember(startPlace, endPlace, avoidUnsafe) {
-        calculatePath(startPlace, endPlace, avoidUnsafe, unsafeZones)
-    }
-
-    val crossesUnsafeDirect = remember(startPlace, endPlace) {
-        val path = calculatePath(startPlace, endPlace, false, unsafeZones)
-        val full = calculatePath(startPlace, endPlace, true, unsafeZones)
-        path.size != full.size
-    }
-
-    val directDist = remember(startPlace, endPlace) {
-        val dX = endPlace.x - startPlace.x
-        val dY = endPlace.y - startPlace.y
-        Math.sqrt((dX * dX + dY * dY).toDouble()).toFloat() * 4.2f
-    }
-
-    val finalDist = remember(matchedPath) {
-        var total = 0f
-        for (i in 0 until matchedPath.size - 1) {
-            val p1 = matchedPath[i]
-            val p2 = matchedPath[i+1]
-            val len = Math.sqrt(((p2.first - p1.first) * (p2.first - p1.first) + (p2.second - p1.second) * (p2.second - p1.second)).toDouble()).toFloat()
-            total += len * 4.2f
-        }
-        total
-    }
-
-    val minutesETA = Math.round(finalDist * 12.0f)
-    val directMinutesETA = Math.round(directDist * 12.0f)
-
-    var isControlsCollapsed by remember { mutableStateOf(false) }
-
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Color(0xFF141416))
-    ) {
-        // 1. Full Screen Interactive Map using MapLibre Mapbox SDK
-        val mapView = remember(context) {
-            try {
-                Mapbox.getInstance(context)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-            MapView(context)
-        }
-
-        var mapInstance: MapboxMap? by remember { mutableStateOf(null) }
-
-        DisposableEffect(mapView) {
-            try {
-                mapView.onCreate(null)
-                mapView.onStart()
-                mapView.onResume()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-            onDispose {
-                try {
-                    mapView.onPause()
-                    mapView.onStop()
-                    mapView.onDestroy()
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
-
-        LaunchedEffect(mapView) {
-            mapView.getMapAsync { map ->
-                mapInstance = map
-                map.setStyle("https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json") { style ->
-                    // Initial style loaded
-                }
-            }
-        }
-
-        // Draw overlays dynamically on map changes or variable updates
-        LaunchedEffect(mapInstance, startPlace, endPlace, avoidUnsafe, currentUserLocation, activeFilter, filteredPlaces, followCurrentUser) {
-            val map = mapInstance ?: return@LaunchedEffect
-            try {
-                map.clear()
-
-                // 1. Current user location marker
-                currentUserLocation?.let { loc ->
-                    map.addMarker(
-                        MarkerOptions()
-                            .position(loc)
-                            .title("My Location (GPS)")
-                            .snippet("Accurate real-time tracking")
-                    )
-                    if (followCurrentUser) {
-                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(loc, 14.5))
-                    }
-                }
-
-                // 2. Landmarks
-                filteredPlaces.forEach { place ->
-                    val isStart = place.name == startPlace.name
-                    val isEnd = place.name == endPlace.name
-                    val markerPrefix = when {
-                        isStart -> "🟢 [Start] "
-                        isEnd -> "🔴 [Destination] "
-                        else -> ""
-                    }
-                    map.addMarker(
-                        MarkerOptions()
-                            .position(LatLng(place.lat, place.lng))
-                            .title("$markerPrefix${place.name}")
-                            .snippet("${place.category} - ${place.address}")
-                    )
-                }
-
-                // 3. Unsafe threat hazard overlays
-                unsafeZones.forEach { zone ->
-                    val centerLat = 37.7880 - (zone.y * 0.0300)
-                    val centerLng = -122.4350 + (zone.x * 0.0350)
-                    val segments = 16
-                    val circlePoints = mutableListOf<LatLng>()
-                    val radK = zone.radius * 0.015f
-                    for (i in 0..segments) {
-                        val theta = (i * 2.0 * Math.PI / segments)
-                        val lat = centerLat + Math.sin(theta) * radK
-                        val lng = centerLng + Math.cos(theta) * radK
-                        circlePoints.add(LatLng(lat, lng))
-                    }
-                    map.addPolyline(
-                        PolylineOptions()
-                            .addAll(circlePoints)
-                            .color(android.graphics.Color.parseColor("#EF4444"))
-                            .width(2.5f)
-                    )
-                }
-
-                // 4. Safe Detour route polyline
-                val pathPoints = matchedPath.map { p ->
-                    LatLng(
-                        37.7880 - (p.second * 0.0300),
-                        -122.4350 + (p.first * 0.0350)
-                    )
-                }
-                if (pathPoints.isNotEmpty()) {
-                    val strokeColorHex = if (avoidUnsafe) "#10B981" else "#F59E0B"
-                    map.addPolyline(
-                        PolylineOptions()
-                            .addAll(pathPoints)
-                            .color(android.graphics.Color.parseColor(strokeColorHex))
-                            .width(5.5f)
-                    )
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        AndroidView(
-            factory = { mapView },
-            modifier = Modifier.fillMaxSize(),
-            update = { /* Updates are performed dynamically via the LaunchedEffect flow for reliability and performance */ }
-        )
-
-        // Camera updates when selections change
-        LaunchedEffect(selectedLandmark) {
-            selectedLandmark?.let { place ->
-                mapInstance?.animateCamera(
-                    CameraUpdateFactory.newLatLngZoom(LatLng(place.lat, place.lng), 14.5)
-                )
-            }
-        }
-
-        LaunchedEffect(startPlace) {
-            mapInstance?.animateCamera(
-                CameraUpdateFactory.newLatLngZoom(LatLng(startPlace.lat, startPlace.lng), 13.5)
-            )
-        }
-
-        // HUD overlay panels
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .padding(16.dp)
-                .windowInsetsPadding(WindowInsets.statusBars),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xE918181A)),
-                    border = BorderStroke(1.dp, Color(0xFF2E2E32))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .background(SafeEmerald, CircleShape)
-                        )
-                        Text(
-                            text = "MapLibre OpenStreetMap Active",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
-                }
-
-                IconButton(
-                    onClick = { isControlsCollapsed = !isControlsCollapsed },
-                    modifier = Modifier
-                        .size(38.dp)
-                        .background(Color(0xE918181A), CircleShape)
-                        .border(1.dp, Color(0xFF2E2E32), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = if (isControlsCollapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
-                        contentDescription = "Collapse menu",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
-
-            AnimatedVisibility(visible = !isControlsCollapsed) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xF41E1E22)),
-                    border = BorderStroke(1.dp, Color(0xFF2E2E32))
-                ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = searchQuery,
-                            onValueChange = { 
-                                searchQuery = it
-                                showSearchResults = it.isNotEmpty()
-                            },
-                            placeholder = { Text("Search safe anchors, hospital or precinct...", fontSize = 11.sp, color = Color.Gray) },
-                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search icon", tint = Color.Gray, modifier = Modifier.size(16.dp)) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(46.dp),
-                            singleLine = true,
-                            textStyle = TextStyle(fontSize = 11.sp, color = Color.White),
-                            shape = RoundedCornerShape(10.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = CrimsonAlert,
-                                unfocusedBorderColor = Color(0xFF2D2D30),
-                                focusedContainerColor = Color(0xFF141416),
-                                unfocusedContainerColor = Color(0xFF141416)
-                            )
-                        )
-
-                        if (showSearchResults && searchResults.isNotEmpty()) {
-                            LazyColumn(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 120.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                items(searchResults) { place ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                endPlace = place
-                                                searchQuery = ""
-                                                showSearchResults = false
-                                                selectedLandmark = place
-                                                Toast.makeText(context, "Route set to: ${place.name}", Toast.LENGTH_SHORT).show()
-                                            }
-                                            .padding(6.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = when (place.category) {
-                                                "Police" -> Icons.Default.LocalPolice
-                                                "Hospital" -> Icons.Default.LocalHospital
-                                                "Safe Haven" -> Icons.Default.Shield
-                                                else -> Icons.Default.LocationOn
-                                            },
-                                            tint = when (place.category) {
-                                                "Police" -> Color(0xFF3B82F6)
-                                                "Hospital" -> Color(0xFFEF4444)
-                                                "Safe Haven" -> Color(0xFFA855F7)
-                                                else -> SafeEmerald
-                                            },
-                                            contentDescription = null,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Column {
-                                            Text(place.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                            Text(place.address, fontSize = 9.sp, color = Color.Gray)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("START HUB", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = SafeEmerald)
-                                var startExpanded by remember { mutableStateOf(false) }
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF141416))
-                                        .clickable { startExpanded = true }
-                                        .padding(8.dp)
-                                ) {
-                                    Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                                        Text(startPlace.name, fontSize = 11.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(14.dp))
-                                    }
-                                    DropdownMenu(
-                                        expanded = startExpanded,
-                                        onDismissRequest = { startExpanded = false }
-                                    ) {
-                                        allPlaces.filter { it.category == "Place" || it.name == "My Current Location" }.forEach { place ->
-                                            DropdownMenuItem(
-                                                text = { Text(place.name, fontSize = 11.sp) },
-                                                onClick = {
-                                                    startPlace = place
-                                                    startExpanded = false
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            IconButton(
-                                onClick = {
-                                    val temp = startPlace
-                                    startPlace = endPlace
-                                    endPlace = temp
-                                },
-                                modifier = Modifier
-                                    .align(Alignment.Bottom)
-                                    .size(32.dp)
-                                    .background(Color(0xFF2D2D30), CircleShape)
-                            ) {
-                                Icon(Icons.Default.SwapHoriz, contentDescription = "Swap", tint = Color.White, modifier = Modifier.size(16.dp))
-                            }
-
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("TARGET DESTINATION", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = CrimsonAlert)
-                                var endExpanded by remember { mutableStateOf(false) }
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF141416))
-                                        .clickable { endExpanded = true }
-                                        .padding(8.dp)
-                                ) {
-                                    Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                                        Text(endPlace.name, fontSize = 11.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(14.dp))
-                                    }
-                                    DropdownMenu(
-                                        expanded = endExpanded,
-                                        onDismissRequest = { endExpanded = false }
-                                    ) {
-                                        allPlaces.forEach { place ->
-                                            DropdownMenuItem(
-                                                text = { Text(place.name, fontSize = 11.sp) },
-                                                onClick = {
-                                                    endPlace = place
-                                                    endExpanded = false
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Icon(Icons.Default.Shield, contentDescription = null, tint = SafeEmerald, modifier = Modifier.size(16.dp))
-                                Text("Evade Hazardous Alleys", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-                            }
-                            Switch(
-                                checked = avoidUnsafe,
-                                onCheckedChange = { avoidUnsafe = it },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
-                                    checkedTrackColor = SafeEmerald,
-                                    uncheckedThumbColor = Color.Gray,
-                                    uncheckedTrackColor = Color(0xFF141416)
-                                )
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF141416), RoundedCornerShape(10.dp))
-                                .padding(10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text(if (avoidUnsafe) "SMART DETOUR ACTIVE" else "FASTEST DIRECT PATH", fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, color = if (avoidUnsafe) SafeEmerald else Color(0xFFF59E0B))
-                                Text("${minutesETA} mins walking time", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                            }
-                            Text(String.format(Locale.US, "%.2f km", finalDist), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Active safety anchor chips
-        Card(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(bottom = 90.dp, start = 16.dp)
-                .widthIn(max = 240.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xE918181A)),
-            border = BorderStroke(1.dp, Color(0xFF2E2E32))
-        ) {
-            Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("FILTER SECTOR PLACES", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.padding(start = 4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    val filters = listOf("ALL", "POLICE", "HOSPITAL", "HAVEN")
-                    filters.forEach { filter ->
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (activeFilter == filter) CrimsonAlert else Color(0xFF2D2D30))
-                                .clickable { activeFilter = filter }
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(filter, fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        }
-                    }
-                }
-            }
-        }
-
-        // GPS positioning controls
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(bottom = 90.dp, end = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            horizontalAlignment = Alignment.End
-        ) {
-            if (!localHasLocationPermission) {
-                Button(
-                    onClick = { permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
-                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("Enable GPS Tracker", fontSize = 10.sp)
-                    }
-                }
-            } else {
-                IconButton(
-                    onClick = {
-                        followCurrentUser = !followCurrentUser
-                        if (followCurrentUser) {
-                            currentUserLocation?.let { loc ->
-                                mapInstance?.animateCamera(CameraUpdateFactory.newLatLngZoom(loc, 14.5))
-                            }
-                        }
-                    },
-                    modifier = Modifier
-                        .size(44.dp)
-                        .background(if (followCurrentUser) CrimsonAlert else Color(0xE918181A), CircleShape)
-                        .border(1.dp, Color(0xFF2E2E32), CircleShape)
-                ) {
-                    Icon(
-                        imageVector = if (followCurrentUser) Icons.Default.MyLocation else Icons.Default.LocationSearching,
-                        contentDescription = "GPS Center tracking",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        }
-
-        // Active pulsing SOS Floating Action Button (FAB)
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(bottom = 16.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            val isSosTriggered by viewModel.isSosTriggered.collectAsState()
-            
-            val infiniteTransition = rememberInfiniteTransition()
-            val pulseScale by infiniteTransition.animateFloat(
-                initialValue = 1.0f,
-                targetValue = if (isSosTriggered) 1.6f else 1.3f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(1000, easing = LinearEasing),
-                    repeatMode = RepeatMode.Reverse
-                )
-            )
-            val pulseAlpha by infiniteTransition.animateFloat(
-                initialValue = 0.4f,
-                targetValue = 0.0f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(1000, easing = LinearEasing),
-                    repeatMode = RepeatMode.Reverse
-                )
-            )
-
-            Box(
-                modifier = Modifier
-                    .size(80.dp)
-                    .graphicsLayer(scaleX = pulseScale, scaleY = pulseScale)
-                    .background(
-                        color = if (isSosTriggered) Color(0xFFEF4444).copy(alpha = pulseAlpha) else Color(0xFFFF9494).copy(alpha = pulseAlpha),
-                        shape = CircleShape
-                    )
-            )
-
-            Button(
-                onClick = {
-                    if (isSosTriggered) {
-                        viewModel.resetSOS()
-                        Toast.makeText(context, "SOS Standby Mode Enabled", Toast.LENGTH_SHORT).show()
-                    } else {
-                        viewModel.triggerSOS()
-                        Toast.makeText(context, "SOS ALERT INITIATED! Contacts Alerted.", Toast.LENGTH_LONG).show()
-                    }
-                },
-                modifier = Modifier
-                    .size(68.dp)
-                    .testTag("map_sos_fab"),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isSosTriggered) Color(0xFFB91C1C) else Color(0xFFEF4444)
-                ),
-                shape = CircleShape,
-                contentPadding = PaddingValues(0.dp),
-                elevation = ButtonDefaults.buttonElevation(8.dp)
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = if (isSosTriggered) Icons.Default.Shield else Icons.Default.NotificationsActive,
-                        contentDescription = "SOS Button Icon",
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Text(
-                        text = if (isSosTriggered) "ACTIVE" else "SOS",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color.White
-                    )
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun UnusedOldSafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
     
-    // Core landmark places
-    val allPlaces = remember {
+    // Core landmark places with dynamic My Current Location coordinates based on GPS
+    val allPlaces = remember(liveLocation) {
+        val currentLat = liveLocation?.latitude ?: 37.7749
+        val currentLng = liveLocation?.longitude ?: -122.4194
         listOf(
-            MapPlace("My Current Location", 37.7749, -122.4194, 0.25f, 0.45f, "Place", "Coordinates based on GPS"),
+            MapPlace("My Current Location", currentLat, currentLng, 0.25f, 0.45f, "Place", "Coordinates based on GPS"),
             MapPlace("Central Station", 37.7801, -122.4120, 0.15f, 0.15f, "Place", "Transit hub, high foot traffic"),
             MapPlace("Downtown Plaza", 37.7725, -122.4080, 0.55f, 0.48f, "Place", "Commercial shopping corridor"),
             MapPlace("Tech Park Campus", 37.7650, -122.4250, 0.22f, 0.78f, "Place", "Offices and research facility"),
@@ -2540,6 +1888,12 @@ fun UnusedOldSafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modi
     var selectedLandmark by remember { mutableStateOf<MapPlace?>(null) }
     var showSearchResults by remember { mutableStateOf(false) }
 
+    LaunchedEffect(liveLocation) {
+        if (startPlace.name == "My Current Location") {
+            startPlace = allPlaces[0]
+        }
+    }
+
     val filteredPlaces = remember(activeFilter, allPlaces) {
         if (activeFilter == "ALL") allPlaces
         else allPlaces.filter { 
@@ -2565,13 +1919,14 @@ fun UnusedOldSafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modi
 
     val scrollState = rememberScrollState()
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(scrollState)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
+    Box(modifier = modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(scrollState)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
         // Core Header Label
         Column {
             Text(
@@ -2912,129 +2267,368 @@ fun UnusedOldSafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modi
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
         ) {
             Column {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(300.dp)
-                        .background(Color(0xFF141416))
-                        .clip(RoundedCornerShape(24.dp))
-                ) {
-                    // Camera updates handled by map engine
-
-                    Text(
-                        text = "Map rendering placeholder",
-                        color = Color.White,
-                        modifier = Modifier.align(Alignment.Center)
-                    )
-
-                    selectedLandmark?.let { place ->
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(bottom = 12.dp)
-                                .fillMaxWidth(0.9f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(Color(0xE61E1E22))
-                                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f), RoundedCornerShape(14.dp))
-                                .padding(12.dp)
+                if (!hasLocationPermission) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(300.dp)
+                            .background(Color(0xFF141416))
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = when (place.category) {
-                                                "Police" -> Icons.Default.LocalPolice
-                                                "Hospital" -> Icons.Default.LocalHospital
-                                                "Safe Haven" -> Icons.Default.Shield
-                                                else -> Icons.Default.Place
-                                            },
-                                            contentDescription = "Landmark Type Icon",
-                                            tint = when (place.category) {
-                                                "Police" -> Color(0xFF1E88E5)
-                                                "Hospital" -> Color(0xFFE53935)
-                                                "Safe Haven" -> Color(0xFF8E24AA)
-                                                else -> SafeEmerald
-                                            },
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Text(
-                                            place.name,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            fontSize = 12.sp,
-                                            color = Color.White,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                            Icon(Icons.Default.LocationOff, contentDescription = "Location disabled", tint = CrimsonAlert, modifier = Modifier.size(48.dp))
+                            Text("Location Permission Needed", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color.White)
+                            Text(
+                                "SafeHer needs location permission to show your live position and keep you safe.",
+                                fontSize = 11.sp,
+                                textAlign = TextAlign.Center,
+                                color = TextSecondary
+                            )
+                            Button(
+                                onClick = {
+                                    permissionLauncher.launch(
+                                        arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION)
+                                    )
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert)
+                            ) {
+                                Text("Enable Location", fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+                        }
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(300.dp)
+                            .background(Color(0xFF141416))
+                            .clip(RoundedCornerShape(24.dp))
+                    ) {
+                        val osmStyleJson = remember {
+                            """
+                            {
+                              "version": 8,
+                              "sources": {
+                                "osm": {
+                                  "type": "raster",
+                                  "tiles": [
+                                    "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                                    "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                                    "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                                  ],
+                                  "tileSize": 256,
+                                  "attribution": "© OpenStreetMap contributors"
+                                }
+                              },
+                              "layers": [
+                                {
+                                  "id": "osm",
+                                  "type": "raster",
+                                  "source": "osm",
+                                  "minzoom": 0,
+                                  "maxzoom": 19
+                                }
+                              ]
+                            }
+                            """.trimIndent()
+                        }
+
+                        val mapLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+                        val mapView = remember {
+                            org.maplibre.android.maps.MapView(context).apply {
+                                getMapAsync { mapboxMap ->
+                                    mapboxMap.setStyle(org.maplibre.android.maps.Style.Builder().fromJson(osmStyleJson))
+                                }
+                            }
+                        }
+
+                        DisposableEffect(mapLifecycle, mapView) {
+                            val observer = LifecycleEventObserver { _, event ->
+                                try {
+                                    when (event) {
+                                        Lifecycle.Event.ON_CREATE -> mapView.onCreate(null)
+                                        Lifecycle.Event.ON_START -> mapView.onStart()
+                                        Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                                        Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                                        Lifecycle.Event.ON_STOP -> mapView.onStop()
+                                        Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
+                                        else -> {}
                                     }
-                                    
-                                    Badge(
-                                        containerColor = when (place.category) {
-                                            "Police" -> Color(0xFF1E88E5).copy(alpha = 0.15f)
-                                            "Hospital" -> Color(0xFFE53935).copy(alpha = 0.15f)
-                                            "Safe Haven" -> Color(0xFF8E24AA).copy(alpha = 0.15f)
-                                            else -> Color.White.copy(alpha = 0.12f)
-                                        },
-                                        contentColor = Color.White
-                                    ) {
-                                        Text(
-                                            text = place.category.uppercase(),
-                                            fontSize = 8.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                                        )
-                                    }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+                            mapLifecycle.addObserver(observer)
+                            onDispose {
+                                try {
+                                    mapLifecycle.removeObserver(observer)
+                                    mapView.onDestroy()
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+                        }
+
+                        var mapboxMapRef by remember { mutableStateOf<org.maplibre.android.maps.MapLibreMap?>(null) }
+
+                        AndroidView(
+                            factory = { mapView },
+                            modifier = Modifier.fillMaxSize()
+                        ) { view ->
+                            view.getMapAsync { map ->
+                                if (mapboxMapRef != map) {
+                                    mapboxMapRef = map
+                                    map.uiSettings.setZoomGesturesEnabled(true)
+                                    map.uiSettings.setCompassEnabled(true)
+                                    map.uiSettings.setLogoEnabled(false)
+                                    map.uiSettings.setAttributionEnabled(false)
+                                }
+                            }
+                        }
+
+                        LaunchedEffect(
+                            mapboxMapRef,
+                            filteredPlaces,
+                            startPlace,
+                            endPlace,
+                            matchedPath,
+                            avoidUnsafe,
+                            crossesUnsafeDirect
+                        ) {
+                            val map = mapboxMapRef ?: return@LaunchedEffect
+                            val style = map.style
+                            val triggerRedraw: (org.maplibre.android.maps.Style) -> Unit = { _ ->
+                                map.clear()
+
+                                // 1. Draw unsafe zones
+                                unsafeZones.forEach { zone ->
+                                    val centerLat = 37.7880 - (zone.y * 0.0300)
+                                    val centerLng = -122.4350 + (zone.x * 0.0350)
+                                    val circleCoords = getCirclePoints(centerLat, centerLng, zone.radius.toDouble() * 3100.0)
+
+                                    map.addPolygon(
+                                        org.maplibre.android.annotations.PolygonOptions()
+                                            .addAll(circleCoords)
+                                            .fillColor(android.graphics.Color.parseColor("#33B3261E"))
+                                    )
+                                    map.addPolyline(
+                                        org.maplibre.android.annotations.PolylineOptions()
+                                            .addAll(circleCoords)
+                                            .color(android.graphics.Color.parseColor("#99B3261E"))
+                                            .width(1.5f)
+                                    )
                                 }
 
-                                Text(
-                                    text = place.address,
-                                    fontSize = 10.sp,
-                                    color = Color.White.copy(alpha = 0.7f)
+                                // 2. Draw direct (unsafe connection) path
+                                if (crossesUnsafeDirect) {
+                                    val directCoords = listOf(
+                                        org.maplibre.android.geometry.LatLng(startPlace.lat, startPlace.lng),
+                                        org.maplibre.android.geometry.LatLng(endPlace.lat, endPlace.lng)
+                                    )
+                                    map.addPolyline(
+                                        org.maplibre.android.annotations.PolylineOptions()
+                                            .addAll(directCoords)
+                                            .color(android.graphics.Color.parseColor("#66B3261E"))
+                                            .width(2.5f)
+                                    )
+                                }
+
+                                // 3. Draw safe smart routing matched path
+                                val pathCoords = matchedPath.map { p ->
+                                    org.maplibre.android.geometry.LatLng(
+                                        37.7880 - (p.second * 0.0300),
+                                        -122.4350 + (p.first * 0.0350)
+                                    )
+                                }
+                                val pathColorHex = if (avoidUnsafe) "#4CAF50" else "#FFA726"
+                                map.addPolyline(
+                                    org.maplibre.android.annotations.PolylineOptions()
+                                        .addAll(pathCoords)
+                                        .color(android.graphics.Color.parseColor(pathColorHex))
+                                        .width(5f)
                                 )
 
-                                Spacer(modifier = Modifier.height(4.dp))
+                                // 4. Draw marker overlays of places
+                                filteredPlaces.forEach { place ->
+                                    val isStart = place.name == startPlace.name
+                                    val isEnd = place.name == endPlace.name
 
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    val safetyScore = when (place.category) {
-                                        "Police", "Hospital" -> "100% Secure"
-                                        "Safe Haven" -> "95% Safe"
-                                        else -> "90% Safe"
+                                    val markerColorHex = when {
+                                        isStart -> "#4CAF50"
+                                        isEnd -> "#B3261E"
+                                        place.category == "Police" -> "#1E88E5"
+                                        place.category == "Hospital" -> "#E53935"
+                                        place.category == "Safe Haven" -> "#8E24AA"
+                                        else -> "#FFA726"
                                     }
+
+                                    val coloredIcon = createColoredMarkerIcon(context, android.graphics.Color.parseColor(markerColorHex))
+                                    map.addMarker(
+                                        org.maplibre.android.annotations.MarkerOptions()
+                                            .position(org.maplibre.android.geometry.LatLng(place.lat, place.lng))
+                                            .title(place.name)
+                                            .snippet(place.address)
+                                            .icon(coloredIcon)
+                                    )
+                                }
+
+                                map.setOnMarkerClickListener { marker ->
+                                    val clickedPlace = filteredPlaces.find { it.name == marker.title }
+                                    if (clickedPlace != null) {
+                                        selectedLandmark = clickedPlace
+                                    }
+                                    true
+                                }
+                            }
+
+                            if (style != null && style.isFullyLoaded) {
+                                triggerRedraw(style)
+                            } else {
+                                map.setStyle(org.maplibre.android.maps.Style.Builder().fromJson(osmStyleJson)) { styleObj ->
+                                    triggerRedraw(styleObj)
+                                }
+                            }
+                        }
+
+                        LaunchedEffect(selectedLandmark, mapboxMapRef) {
+                            val map = mapboxMapRef ?: return@LaunchedEffect
+                            selectedLandmark?.let { landmark ->
+                                map.animateCamera(
+                                    org.maplibre.android.camera.CameraUpdateFactory.newLatLngZoom(
+                                        org.maplibre.android.geometry.LatLng(landmark.lat, landmark.lng),
+                                        14.5
+                                    ),
+                                    1200
+                                )
+                            }
+                        }
+
+                        LaunchedEffect(startPlace, mapboxMapRef) {
+                            val map = mapboxMapRef ?: return@LaunchedEffect
+                            if (selectedLandmark == null) {
+                                map.animateCamera(
+                                    org.maplibre.android.camera.CameraUpdateFactory.newLatLngZoom(
+                                        org.maplibre.android.geometry.LatLng(startPlace.lat, startPlace.lng),
+                                        13.2
+                                    ),
+                                    1200
+                                )
+                            }
+                        }
+
+                        selectedLandmark?.let { place ->
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 12.dp)
+                                    .fillMaxWidth(0.9f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color(0xE61E1E22))
+                                    .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f), RoundedCornerShape(14.dp))
+                                    .padding(12.dp)
+                            ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = when (place.category) {
+                                                    "Police" -> Icons.Default.LocalPolice
+                                                    "Hospital" -> Icons.Default.LocalHospital
+                                                    "Safe Haven" -> Icons.Default.Shield
+                                                    else -> Icons.Default.Place
+                                                },
+                                                contentDescription = "Landmark Type Icon",
+                                                tint = when (place.category) {
+                                                    "Police" -> Color(0xFF1E88E5)
+                                                    "Hospital" -> Color(0xFFE53935)
+                                                    "Safe Haven" -> Color(0xFF8E24AA)
+                                                    else -> SafeEmerald
+                                                },
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text(
+                                                place.name,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 12.sp,
+                                                color = Color.White,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        
+                                        Badge(
+                                            containerColor = when (place.category) {
+                                                "Police" -> Color(0xFF1E88E5).copy(alpha = 0.15f)
+                                                "Hospital" -> Color(0xFFE53935).copy(alpha = 0.15f)
+                                                "Safe Haven" -> Color(0xFF8E24AA).copy(alpha = 0.15f)
+                                                else -> Color.White.copy(alpha = 0.12f)
+                                            },
+                                            contentColor = Color.White
+                                        ) {
+                                            Text(
+                                                text = place.category.uppercase(),
+                                                fontSize = 8.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+
                                     Text(
-                                        text = "⚡ Security Index: $safetyScore",
+                                        text = place.address,
                                         fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SafeEmerald
+                                        color = Color.White.copy(alpha = 0.7f)
                                     )
 
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        TextButton(
-                                            onClick = { selectedLandmark = null },
-                                            contentPadding = PaddingValues(0.dp)
-                                        ) {
-                                            Text("Dismiss", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
-                                        }
+                                    Spacer(modifier = Modifier.height(4.dp))
 
-                                        Button(
-                                            onClick = {
-                                                endPlace = place
-                                                Toast.makeText(context, "Route planned to ${place.name}", Toast.LENGTH_SHORT).show()
-                                            },
-                                            shape = RoundedCornerShape(8.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
-                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                            modifier = Modifier.height(28.dp)
-                                        ) {
-                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                Icon(Icons.Default.Navigation, contentDescription = null, tint = Color.White, modifier = Modifier.size(10.dp))
-                                                Text("GO HERE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        val safetyScore = when (place.category) {
+                                            "Police", "Hospital" -> "100% Secure"
+                                            "Safe Haven" -> "95% Safe"
+                                            else -> "90% Safe"
+                                        }
+                                        Text(
+                                            text = "⚡ Security Index: $safetyScore",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = SafeEmerald
+                                        )
+
+                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            TextButton(
+                                                onClick = { selectedLandmark = null },
+                                                contentPadding = PaddingValues(0.dp)
+                                            ) {
+                                                Text("Dismiss", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
+                                            }
+
+                                            Button(
+                                                onClick = {
+                                                    endPlace = place
+                                                    Toast.makeText(context, "Route planned to ${place.name}", Toast.LENGTH_SHORT).show()
+                                                },
+                                                shape = RoundedCornerShape(8.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                modifier = Modifier.height(28.dp)
+                                            ) {
+                                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(Icons.Default.Navigation, contentDescription = null, tint = Color.White, modifier = Modifier.size(10.dp))
+                                                    Text("GO HERE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                                }
                                             }
                                         }
                                     }
@@ -3166,6 +2760,32 @@ fun UnusedOldSafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modi
             }
         }
     }
+
+    // Floating SOS Alert Button (Overlayed beautifully at the bottom-right corner)
+    FloatingActionButton(
+        onClick = { viewModel.triggerSOS() },
+        containerColor = CrimsonAlert,
+        contentColor = Color.White,
+        modifier = Modifier
+            .align(Alignment.BottomEnd)
+            .padding(24.dp)
+            .testTag("floating_sos_button"),
+        shape = CircleShape
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Warning,
+                contentDescription = "Trigger Emergency SOS",
+                modifier = Modifier.size(24.dp)
+            )
+            Text("SOS", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+    }
+}
 }
 
 // Support Theme Helper
