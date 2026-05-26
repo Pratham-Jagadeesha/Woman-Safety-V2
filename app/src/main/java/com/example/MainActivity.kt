@@ -41,6 +41,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import java.util.Locale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -49,14 +52,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
-import com.google.android.gms.maps.model.CameraPosition
-import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.BitmapDescriptorFactory
-import com.google.android.gms.maps.model.JointType
-import com.google.android.gms.maps.model.PatternItem
-import com.google.android.gms.maps.model.Dash
-import com.google.android.gms.maps.model.Gap
-import com.google.maps.android.compose.*
+import com.mapbox.mapboxsdk.Mapbox
+import com.mapbox.mapboxsdk.maps.MapView
+import com.mapbox.mapboxsdk.maps.MapboxMap
+import com.mapbox.mapboxsdk.maps.Style
+import com.mapbox.mapboxsdk.geometry.LatLng
+import com.mapbox.mapboxsdk.annotations.Marker
+import com.mapbox.mapboxsdk.annotations.MarkerOptions
+import com.mapbox.mapboxsdk.annotations.Polyline
+import com.mapbox.mapboxsdk.annotations.PolylineOptions
+import com.mapbox.mapboxsdk.camera.CameraUpdateFactory
+import com.mapbox.mapboxsdk.camera.CameraPosition
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import com.example.data.Contact
 import com.example.data.Helpline
 import com.example.data.HelplinesAndTips
@@ -1787,6 +1796,729 @@ fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
             MapPlace("Northern Police Precinct", 37.7830, -122.4220, 0.62f, 0.22f, "Police", "Municipal Police Department (Station 4)"),
             MapPlace("Central Police Station", 37.7712, -122.4100, 0.48f, 0.68f, "Police", "Safety hub & precinct HQ"),
             MapPlace("Saint Jude Hospital", 37.7615, -122.4225, 0.28f, 0.88f, "Hospital", "24-Hour emergency unit & trauma center"),
+            MapPlace("SFC Emergency Health Center", 37.7760, -120.4040, 0.88f, 0.52f, "Hospital", "First-aid urgent clinic"),
+            MapPlace("Community Refuge Shelter", 37.7680, -122.4150, 0.44f, 0.51f, "Safe Haven", "Verified night-time safe corridor guardian"),
+            MapPlace("Westhaven Shelter Circle", 37.7815, -122.4310, 0.85f, 0.32f, "Safe Haven", "24/7 community safety refuge")
+        )
+    }
+
+    val unsafeZones = remember {
+        listOf(
+            UnsafeZone("Dimly-lit Alleyway", "Low municipal lighting and active construction zones", 0.48f, 0.38f, 0.10f),
+            UnsafeZone("Industrial Warehouse Zone", "Deserted commercial sector with low security presence", 0.68f, 0.70f, 0.12f)
+        )
+    }
+
+    var searchQuery by remember { mutableStateOf("") }
+    var startPlace by remember { mutableStateOf(allPlaces[0]) } // Current Location
+    var endPlace by remember { mutableStateOf(allPlaces[2]) } // Downtown Plaza
+    var avoidUnsafe by remember { mutableStateOf(true) }
+    var activeFilter by remember { mutableStateOf("ALL") } // "ALL", "POLICE", "HOSPITAL", "HAVEN"
+    var selectedLandmark by remember { mutableStateOf<MapPlace?>(null) }
+    var showSearchResults by remember { mutableStateOf(false) }
+
+    val filteredPlaces = remember(activeFilter, allPlaces) {
+        if (activeFilter == "ALL") allPlaces
+        else allPlaces.filter { 
+            when (activeFilter) {
+                "POLICE" -> it.category == "Police"
+                "HOSPITAL" -> it.category == "Hospital"
+                "HAVEN" -> it.category == "Safe Haven"
+                else -> true
+            }
+        }
+    }
+
+    val searchResults = remember(searchQuery, allPlaces) {
+        if (searchQuery.isBlank()) emptyList()
+        else {
+            allPlaces.filter { 
+                it.name.contains(searchQuery, ignoreCase = true) || 
+                it.category.contains(searchQuery, ignoreCase = true) ||
+                it.address.contains(searchQuery, ignoreCase = true)
+            }
+        }
+    }
+
+    // --- State for Live GPS Location ---
+    var localHasLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        localHasLocationPermission = isGranted
+    }
+
+    var currentUserLocation by remember { mutableStateOf<LatLng?>(null) }
+    var followCurrentUser by remember { mutableStateOf(true) }
+
+    val locationListener = remember {
+        object : LocationListener {
+            override fun onLocationChanged(location: Location) {
+                currentUserLocation = LatLng(location.latitude, location.longitude)
+            }
+            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+            override fun onProviderEnabled(provider: String) {}
+            override fun onProviderDisabled(provider: String) {}
+        }
+    }
+
+    val locationManager = remember { context.getSystemService(Context.LOCATION_SERVICE) as LocationManager }
+
+    LaunchedEffect(localHasLocationPermission) {
+        if (localHasLocationPermission) {
+            try {
+                val isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                val isNetworkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+                val provider = when {
+                    isGpsEnabled -> LocationManager.GPS_PROVIDER
+                    isNetworkEnabled -> LocationManager.NETWORK_PROVIDER
+                    else -> null
+                }
+                if (provider != null) {
+                    val lastKnown = locationManager.getLastKnownLocation(provider)
+                    if (lastKnown != null) {
+                        currentUserLocation = LatLng(lastKnown.latitude, lastKnown.longitude)
+                    }
+                    locationManager.requestLocationUpdates(
+                        provider,
+                        3000L,
+                        2f,
+                        locationListener
+                    )
+                }
+            } catch (e: SecurityException) {
+                e.printStackTrace()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                locationManager.removeUpdates(locationListener)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // Path matched
+    val matchedPath = remember(startPlace, endPlace, avoidUnsafe) {
+        calculatePath(startPlace, endPlace, avoidUnsafe, unsafeZones)
+    }
+
+    val crossesUnsafeDirect = remember(startPlace, endPlace) {
+        val path = calculatePath(startPlace, endPlace, false, unsafeZones)
+        val full = calculatePath(startPlace, endPlace, true, unsafeZones)
+        path.size != full.size
+    }
+
+    val directDist = remember(startPlace, endPlace) {
+        val dX = endPlace.x - startPlace.x
+        val dY = endPlace.y - startPlace.y
+        Math.sqrt((dX * dX + dY * dY).toDouble()).toFloat() * 4.2f
+    }
+
+    val finalDist = remember(matchedPath) {
+        var total = 0f
+        for (i in 0 until matchedPath.size - 1) {
+            val p1 = matchedPath[i]
+            val p2 = matchedPath[i+1]
+            val len = Math.sqrt(((p2.first - p1.first) * (p2.first - p1.first) + (p2.second - p1.second) * (p2.second - p1.second)).toDouble()).toFloat()
+            total += len * 4.2f
+        }
+        total
+    }
+
+    val minutesETA = Math.round(finalDist * 12.0f)
+    val directMinutesETA = Math.round(directDist * 12.0f)
+
+    var isControlsCollapsed by remember { mutableStateOf(false) }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFF141416))
+    ) {
+        // 1. Full Screen Interactive Map using MapLibre Mapbox SDK
+        val mapView = remember(context) {
+            try {
+                Mapbox.getInstance(context)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            MapView(context)
+        }
+
+        var mapInstance: MapboxMap? by remember { mutableStateOf(null) }
+
+        DisposableEffect(mapView) {
+            try {
+                mapView.onCreate(null)
+                mapView.onStart()
+                mapView.onResume()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            onDispose {
+                try {
+                    mapView.onPause()
+                    mapView.onStop()
+                    mapView.onDestroy()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        LaunchedEffect(mapView) {
+            mapView.getMapAsync { map ->
+                mapInstance = map
+                map.setStyle("https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json") { style ->
+                    // Initial style loaded
+                }
+            }
+        }
+
+        // Draw overlays dynamically on map changes or variable updates
+        LaunchedEffect(mapInstance, startPlace, endPlace, avoidUnsafe, currentUserLocation, activeFilter, filteredPlaces, followCurrentUser) {
+            val map = mapInstance ?: return@LaunchedEffect
+            try {
+                map.clear()
+
+                // 1. Current user location marker
+                currentUserLocation?.let { loc ->
+                    map.addMarker(
+                        MarkerOptions()
+                            .position(loc)
+                            .title("My Location (GPS)")
+                            .snippet("Accurate real-time tracking")
+                    )
+                    if (followCurrentUser) {
+                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(loc, 14.5))
+                    }
+                }
+
+                // 2. Landmarks
+                filteredPlaces.forEach { place ->
+                    val isStart = place.name == startPlace.name
+                    val isEnd = place.name == endPlace.name
+                    val markerPrefix = when {
+                        isStart -> "🟢 [Start] "
+                        isEnd -> "🔴 [Destination] "
+                        else -> ""
+                    }
+                    map.addMarker(
+                        MarkerOptions()
+                            .position(LatLng(place.lat, place.lng))
+                            .title("$markerPrefix${place.name}")
+                            .snippet("${place.category} - ${place.address}")
+                    )
+                }
+
+                // 3. Unsafe threat hazard overlays
+                unsafeZones.forEach { zone ->
+                    val centerLat = 37.7880 - (zone.y * 0.0300)
+                    val centerLng = -122.4350 + (zone.x * 0.0350)
+                    val segments = 16
+                    val circlePoints = mutableListOf<LatLng>()
+                    val radK = zone.radius * 0.015f
+                    for (i in 0..segments) {
+                        val theta = (i * 2.0 * Math.PI / segments)
+                        val lat = centerLat + Math.sin(theta) * radK
+                        val lng = centerLng + Math.cos(theta) * radK
+                        circlePoints.add(LatLng(lat, lng))
+                    }
+                    map.addPolyline(
+                        PolylineOptions()
+                            .addAll(circlePoints)
+                            .color(android.graphics.Color.parseColor("#EF4444"))
+                            .width(2.5f)
+                    )
+                }
+
+                // 4. Safe Detour route polyline
+                val pathPoints = matchedPath.map { p ->
+                    LatLng(
+                        37.7880 - (p.second * 0.0300),
+                        -122.4350 + (p.first * 0.0350)
+                    )
+                }
+                if (pathPoints.isNotEmpty()) {
+                    val strokeColorHex = if (avoidUnsafe) "#10B981" else "#F59E0B"
+                    map.addPolyline(
+                        PolylineOptions()
+                            .addAll(pathPoints)
+                            .color(android.graphics.Color.parseColor(strokeColorHex))
+                            .width(5.5f)
+                    )
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        AndroidView(
+            factory = { mapView },
+            modifier = Modifier.fillMaxSize(),
+            update = { /* Updates are performed dynamically via the LaunchedEffect flow for reliability and performance */ }
+        )
+
+        // Camera updates when selections change
+        LaunchedEffect(selectedLandmark) {
+            selectedLandmark?.let { place ->
+                mapInstance?.animateCamera(
+                    CameraUpdateFactory.newLatLngZoom(LatLng(place.lat, place.lng), 14.5)
+                )
+            }
+        }
+
+        LaunchedEffect(startPlace) {
+            mapInstance?.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(LatLng(startPlace.lat, startPlace.lng), 13.5)
+            )
+        }
+
+        // HUD overlay panels
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(16.dp)
+                .windowInsetsPadding(WindowInsets.statusBars),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xE918181A)),
+                    border = BorderStroke(1.dp, Color(0xFF2E2E32))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(SafeEmerald, CircleShape)
+                        )
+                        Text(
+                            text = "MapLibre OpenStreetMap Active",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = { isControlsCollapsed = !isControlsCollapsed },
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(Color(0xE918181A), CircleShape)
+                        .border(1.dp, Color(0xFF2E2E32), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = if (isControlsCollapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
+                        contentDescription = "Collapse menu",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = !isControlsCollapsed) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xF41E1E22)),
+                    border = BorderStroke(1.dp, Color(0xFF2E2E32))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { 
+                                searchQuery = it
+                                showSearchResults = it.isNotEmpty()
+                            },
+                            placeholder = { Text("Search safe anchors, hospital or precinct...", fontSize = 11.sp, color = Color.Gray) },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search icon", tint = Color.Gray, modifier = Modifier.size(16.dp)) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp),
+                            singleLine = true,
+                            textStyle = TextStyle(fontSize = 11.sp, color = Color.White),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = CrimsonAlert,
+                                unfocusedBorderColor = Color(0xFF2D2D30),
+                                focusedContainerColor = Color(0xFF141416),
+                                unfocusedContainerColor = Color(0xFF141416)
+                            )
+                        )
+
+                        if (showSearchResults && searchResults.isNotEmpty()) {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 120.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                items(searchResults) { place ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                endPlace = place
+                                                searchQuery = ""
+                                                showSearchResults = false
+                                                selectedLandmark = place
+                                                Toast.makeText(context, "Route set to: ${place.name}", Toast.LENGTH_SHORT).show()
+                                            }
+                                            .padding(6.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = when (place.category) {
+                                                "Police" -> Icons.Default.LocalPolice
+                                                "Hospital" -> Icons.Default.LocalHospital
+                                                "Safe Haven" -> Icons.Default.Shield
+                                                else -> Icons.Default.LocationOn
+                                            },
+                                            tint = when (place.category) {
+                                                "Police" -> Color(0xFF3B82F6)
+                                                "Hospital" -> Color(0xFFEF4444)
+                                                "Safe Haven" -> Color(0xFFA855F7)
+                                                else -> SafeEmerald
+                                            },
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Column {
+                                            Text(place.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            Text(place.address, fontSize = 9.sp, color = Color.Gray)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("START HUB", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = SafeEmerald)
+                                var startExpanded by remember { mutableStateOf(false) }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFF141416))
+                                        .clickable { startExpanded = true }
+                                        .padding(8.dp)
+                                ) {
+                                    Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                        Text(startPlace.name, fontSize = 11.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(14.dp))
+                                    }
+                                    DropdownMenu(
+                                        expanded = startExpanded,
+                                        onDismissRequest = { startExpanded = false }
+                                    ) {
+                                        allPlaces.filter { it.category == "Place" || it.name == "My Current Location" }.forEach { place ->
+                                            DropdownMenuItem(
+                                                text = { Text(place.name, fontSize = 11.sp) },
+                                                onClick = {
+                                                    startPlace = place
+                                                    startExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    val temp = startPlace
+                                    startPlace = endPlace
+                                    endPlace = temp
+                                },
+                                modifier = Modifier
+                                    .align(Alignment.Bottom)
+                                    .size(32.dp)
+                                    .background(Color(0xFF2D2D30), CircleShape)
+                            ) {
+                                Icon(Icons.Default.SwapHoriz, contentDescription = "Swap", tint = Color.White, modifier = Modifier.size(16.dp))
+                            }
+
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("TARGET DESTINATION", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = CrimsonAlert)
+                                var endExpanded by remember { mutableStateOf(false) }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFF141416))
+                                        .clickable { endExpanded = true }
+                                        .padding(8.dp)
+                                ) {
+                                    Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                        Text(endPlace.name, fontSize = 11.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(14.dp))
+                                    }
+                                    DropdownMenu(
+                                        expanded = endExpanded,
+                                        onDismissRequest = { endExpanded = false }
+                                    ) {
+                                        allPlaces.forEach { place ->
+                                            DropdownMenuItem(
+                                                text = { Text(place.name, fontSize = 11.sp) },
+                                                onClick = {
+                                                    endPlace = place
+                                                    endExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(Icons.Default.Shield, contentDescription = null, tint = SafeEmerald, modifier = Modifier.size(16.dp))
+                                Text("Evade Hazardous Alleys", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                            }
+                            Switch(
+                                checked = avoidUnsafe,
+                                onCheckedChange = { avoidUnsafe = it },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = SafeEmerald,
+                                    uncheckedThumbColor = Color.Gray,
+                                    uncheckedTrackColor = Color(0xFF141416)
+                                )
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF141416), RoundedCornerShape(10.dp))
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(if (avoidUnsafe) "SMART DETOUR ACTIVE" else "FASTEST DIRECT PATH", fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, color = if (avoidUnsafe) SafeEmerald else Color(0xFFF59E0B))
+                                Text("${minutesETA} mins walking time", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+                            Text(String.format(Locale.US, "%.2f km", finalDist), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Active safety anchor chips
+        Card(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(bottom = 90.dp, start = 16.dp)
+                .widthIn(max = 240.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xE918181A)),
+            border = BorderStroke(1.dp, Color(0xFF2E2E32))
+        ) {
+            Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("FILTER SECTOR PLACES", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.padding(start = 4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val filters = listOf("ALL", "POLICE", "HOSPITAL", "HAVEN")
+                    filters.forEach { filter ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (activeFilter == filter) CrimsonAlert else Color(0xFF2D2D30))
+                                .clickable { activeFilter = filter }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(filter, fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+
+        // GPS positioning controls
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(bottom = 90.dp, end = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.End
+        ) {
+            if (!localHasLocationPermission) {
+                Button(
+                    onClick = { permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
+                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("Enable GPS Tracker", fontSize = 10.sp)
+                    }
+                }
+            } else {
+                IconButton(
+                    onClick = {
+                        followCurrentUser = !followCurrentUser
+                        if (followCurrentUser) {
+                            currentUserLocation?.let { loc ->
+                                mapInstance?.animateCamera(CameraUpdateFactory.newLatLngZoom(loc, 14.5))
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(if (followCurrentUser) CrimsonAlert else Color(0xE918181A), CircleShape)
+                        .border(1.dp, Color(0xFF2E2E32), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = if (followCurrentUser) Icons.Default.MyLocation else Icons.Default.LocationSearching,
+                        contentDescription = "GPS Center tracking",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+
+        // Active pulsing SOS Floating Action Button (FAB)
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            val isSosTriggered by viewModel.isSosTriggered.collectAsState()
+            
+            val infiniteTransition = rememberInfiniteTransition()
+            val pulseScale by infiniteTransition.animateFloat(
+                initialValue = 1.0f,
+                targetValue = if (isSosTriggered) 1.6f else 1.3f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1000, easing = LinearEasing),
+                    repeatMode = RepeatMode.Reverse
+                )
+            )
+            val pulseAlpha by infiniteTransition.animateFloat(
+                initialValue = 0.4f,
+                targetValue = 0.0f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1000, easing = LinearEasing),
+                    repeatMode = RepeatMode.Reverse
+                )
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .graphicsLayer(scaleX = pulseScale, scaleY = pulseScale)
+                    .background(
+                        color = if (isSosTriggered) Color(0xFFEF4444).copy(alpha = pulseAlpha) else Color(0xFFFF9494).copy(alpha = pulseAlpha),
+                        shape = CircleShape
+                    )
+            )
+
+            Button(
+                onClick = {
+                    if (isSosTriggered) {
+                        viewModel.resetSOS()
+                        Toast.makeText(context, "SOS Standby Mode Enabled", Toast.LENGTH_SHORT).show()
+                    } else {
+                        viewModel.triggerSOS()
+                        Toast.makeText(context, "SOS ALERT INITIATED! Contacts Alerted.", Toast.LENGTH_LONG).show()
+                    }
+                },
+                modifier = Modifier
+                    .size(68.dp)
+                    .testTag("map_sos_fab"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isSosTriggered) Color(0xFFB91C1C) else Color(0xFFEF4444)
+                ),
+                shape = CircleShape,
+                contentPadding = PaddingValues(0.dp),
+                elevation = ButtonDefaults.buttonElevation(8.dp)
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = if (isSosTriggered) Icons.Default.Shield else Icons.Default.NotificationsActive,
+                        contentDescription = "SOS Button Icon",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Text(
+                        text = if (isSosTriggered) "ACTIVE" else "SOS",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun UnusedOldSafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    
+    // Core landmark places
+    val allPlaces = remember {
+        listOf(
+            MapPlace("My Current Location", 37.7749, -122.4194, 0.25f, 0.45f, "Place", "Coordinates based on GPS"),
+            MapPlace("Central Station", 37.7801, -122.4120, 0.15f, 0.15f, "Place", "Transit hub, high foot traffic"),
+            MapPlace("Downtown Plaza", 37.7725, -122.4080, 0.55f, 0.48f, "Place", "Commercial shopping corridor"),
+            MapPlace("Tech Park Campus", 37.7650, -122.4250, 0.22f, 0.78f, "Place", "Offices and research facility"),
+            MapPlace("Grand Library", 37.7780, -122.4180, 0.42f, 0.28f, "Place", "Public civic center square"),
+            MapPlace("SafeHer HQ", 37.7710, -122.4210, 0.35f, 0.62f, "Place", "Community security office"),
+            MapPlace("Metro Crossing", 37.7610, -122.4150, 0.75f, 0.85f, "Place", "Subway platform, illuminated 24/7"),
+            MapPlace("Oakwood Apartments", 37.7850, -122.4280, 0.82f, 0.12f, "Place", "Residential family zone"),
+            
+            // Emergencies
+            MapPlace("Northern Police Precinct", 37.7830, -122.4220, 0.62f, 0.22f, "Police", "Municipal Police Department (Station 4)"),
+            MapPlace("Central Police Station", 37.7712, -122.4100, 0.48f, 0.68f, "Police", "Safety hub & precinct HQ"),
+            MapPlace("Saint Jude Hospital", 37.7615, -122.4225, 0.28f, 0.88f, "Hospital", "24-Hour emergency unit & trauma center"),
             MapPlace("SFC Emergency Health Center", 37.7760, -122.4040, 0.88f, 0.52f, "Hospital", "First-aid urgent clinic"),
             MapPlace("Community Refuge Shelter", 37.7680, -122.4150, 0.44f, 0.51f, "Safe Haven", "Verified night-time safe corridor guardian"),
             MapPlace("Westhaven Shelter Circle", 37.7815, -122.4310, 0.85f, 0.32f, "Safe Haven", "24/7 community safety refuge")
@@ -2187,110 +2919,13 @@ fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
                         .background(Color(0xFF141416))
                         .clip(RoundedCornerShape(24.dp))
                 ) {
-                    val cameraPositionState = rememberCameraPositionState {
-                        position = CameraPosition.fromLatLngZoom(LatLng(startPlace.lat, startPlace.lng), 13.2f)
-                    }
+                    // Camera updates handled by map engine
 
-                    LaunchedEffect(startPlace) {
-                        cameraPositionState.position = CameraPosition.fromLatLngZoom(LatLng(startPlace.lat, startPlace.lng), 13.2f)
-                    }
-
-                    LaunchedEffect(selectedLandmark) {
-                        selectedLandmark?.let {
-                            cameraPositionState.position = CameraPosition.fromLatLngZoom(LatLng(it.lat, it.lng), 14.5f)
-                        }
-                    }
-
-                    GoogleMap(
-                        modifier = Modifier.fillMaxSize(),
-                        cameraPositionState = cameraPositionState,
-                        properties = MapProperties(
-                            isMyLocationEnabled = false,
-                            mapType = MapType.NORMAL
-                        ),
-                        uiSettings = MapUiSettings(
-                            zoomControlsEnabled = true,
-                            myLocationButtonEnabled = false,
-                            compassEnabled = true
-                        )
-                    ) {
-                        unsafeZones.forEach { zone ->
-                            val center = LatLng(
-                                37.7880 - (zone.y * 0.0300),
-                                -122.4350 + (zone.x * 0.0350)
-                            )
-                            Circle(
-                                center = center,
-                                radius = zone.radius.toDouble() * 3100.0,
-                                fillColor = CrimsonAlert.copy(alpha = 0.22f),
-                                strokeColor = CrimsonAlert.copy(alpha = 0.65f),
-                                strokeWidth = 3f
-                            )
-                        }
-
-                        if (avoidUnsafe && crossesUnsafeDirect) {
-                            Polyline(
-                                points = listOf(
-                                    LatLng(startPlace.lat, startPlace.lng),
-                                    LatLng(endPlace.lat, endPlace.lng)
-                                ),
-                                color = CrimsonAlert.copy(alpha = 0.5f),
-                                width = 6f,
-                                jointType = JointType.ROUND,
-                                pattern = listOf(Dash(15f), Gap(10f))
-                            )
-                        } else if (!avoidUnsafe && crossesUnsafeDirect) {
-                            Polyline(
-                                points = listOf(
-                                    LatLng(startPlace.lat, startPlace.lng),
-                                    LatLng(endPlace.lat, endPlace.lng)
-                                ),
-                                color = CrimsonAlert,
-                                width = 8f,
-                                jointType = JointType.ROUND,
-                                pattern = listOf(Dash(20f), Gap(10f))
-                            )
-                        }
-
-                        val strokeColor = if (avoidUnsafe) SafeEmerald else Color(0xFFFFA726)
-                        val pathPoints = matchedPath.map { p ->
-                            LatLng(
-                                37.7880 - (p.second * 0.0300),
-                                -122.4350 + (p.first * 0.0350)
-                            )
-                        }
-                        Polyline(
-                            points = pathPoints,
-                            color = strokeColor,
-                            width = 9f,
-                            jointType = JointType.ROUND
-                        )
-
-                        filteredPlaces.forEach { place ->
-                            val isStart = place.name == startPlace.name
-                            val isEnd = place.name == endPlace.name
-                            
-                            val iconHue = when {
-                                isStart -> BitmapDescriptorFactory.HUE_GREEN
-                                isEnd -> BitmapDescriptorFactory.HUE_RED
-                                place.category == "Police" -> BitmapDescriptorFactory.HUE_AZURE
-                                place.category == "Hospital" -> BitmapDescriptorFactory.HUE_RED
-                                place.category == "Safe Haven" -> BitmapDescriptorFactory.HUE_VIOLET
-                                else -> BitmapDescriptorFactory.HUE_ORANGE
-                            }
-                            
-                            Marker(
-                                state = rememberMarkerState(position = LatLng(place.lat, place.lng)),
-                                title = place.name,
-                                snippet = place.address,
-                                icon = BitmapDescriptorFactory.defaultMarker(iconHue),
-                                onClick = {
-                                    selectedLandmark = place
-                                    false
-                                }
-                            )
-                        }
-                    }
+                    Text(
+                        text = "Map rendering placeholder",
+                        color = Color.White,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
 
                     selectedLandmark?.let { place ->
                         Box(
