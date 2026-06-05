@@ -48,21 +48,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
-import org.maplibre.android.MapLibre
-import org.maplibre.android.maps.MapView
-import org.maplibre.android.maps.MapLibreMap
-import org.maplibre.android.maps.Style
-import org.maplibre.android.camera.CameraUpdateFactory
-import org.maplibre.android.geometry.LatLng
-import org.maplibre.android.annotations.MarkerOptions
-import org.maplibre.android.annotations.PolylineOptions
-import org.maplibre.android.annotations.PolygonOptions
-import org.maplibre.android.annotations.IconFactory
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
@@ -79,11 +68,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        try {
-            org.maplibre.android.MapLibre.getInstance(this)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -1780,43 +1764,6 @@ fun calculatePath(start: MapPlace, end: MapPlace, avoidUnsafe: Boolean, unsafeZo
     return path
 }
 
-fun createColoredMarkerIcon(context: android.content.Context, color: Int): org.maplibre.android.annotations.Icon {
-    val size = 42
-    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    val paint = Paint().apply {
-        isAntiAlias = true
-    }
-    paint.color = android.graphics.Color.WHITE
-    canvas.drawCircle(size / 2f, size / 2f, size / 2.2f, paint)
-    paint.color = color
-    canvas.drawCircle(size / 2f, size / 2f, size / 3.2f, paint)
-    return org.maplibre.android.annotations.IconFactory.getInstance(context).fromBitmap(bitmap)
-}
-
-fun getCirclePoints(lat: Double, lng: Double, radiusInMeters: Double): List<LatLng> {
-    val points = mutableListOf<LatLng>()
-    val numPoints = 24
-    val earthRadius = 6378137.0
-    val latRad = Math.toRadians(lat)
-    val lngRad = Math.toRadians(lng)
-    val dR = radiusInMeters / earthRadius
-    for (i in 0 until numPoints) {
-        val angle = 2 * Math.PI * i / numPoints
-        val pointLatRad = Math.asin(
-            Math.sin(latRad) * Math.cos(dR) +
-            Math.cos(latRad) * Math.sin(dR) * Math.cos(angle)
-        )
-        val pointLngRad = lngRad + Math.atan2(
-            Math.sin(angle) * Math.sin(dR) * Math.cos(latRad),
-            Math.cos(dR) - Math.sin(latRad) * Math.sin(pointLatRad)
-        )
-        points.add(LatLng(Math.toDegrees(pointLatRad), Math.toDegrees(pointLngRad)))
-    }
-    points.add(points[0])
-    return points
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
@@ -1848,22 +1795,77 @@ fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
             }
         }
     }
-    
-    // Core landmark places with dynamic My Current Location coordinates based on GPS
+
+    // Helper functions to launch Google Maps App
+    fun launchGoogleMapsApp(lat: Double?, lng: Double?, query: String? = null) {
+        val gmmIntentUri = if (query != null) {
+            val queryEncoded = java.net.URLEncoder.encode(query, "UTF-8")
+            if (lat != null && lng != null) {
+                Uri.parse("geo:$lat,$lng?q=$queryEncoded")
+            } else {
+                Uri.parse("geo:0,0?q=$queryEncoded")
+            }
+        } else if (lat != null && lng != null) {
+            Uri.parse("geo:$lat,$lng?z=15")
+        } else {
+            Uri.parse("geo:37.7749,-122.4194?z=13")
+        }
+        
+        val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri).apply {
+            setPackage("com.google.android.apps.maps")
+        }
+        
+        try {
+            context.startActivity(mapIntent)
+        } catch (e: Exception) {
+            // Web fallback
+            val webUri = if (query != null) {
+                val queryEncoded = java.net.URLEncoder.encode(query, "UTF-8")
+                Uri.parse("https://www.google.com/maps/search/?api=1&query=$queryEncoded")
+            } else if (lat != null && lng != null) {
+                Uri.parse("https://www.google.com/maps/@$lat,$lng,15z")
+            } else {
+                Uri.parse("https://www.google.com/maps")
+            }
+            val webIntent = Intent(Intent.ACTION_VIEW, webUri)
+            try {
+                context.startActivity(webIntent)
+            } catch (ex: Exception) {
+                Toast.makeText(context, "Could not open map: ${ex.localizedMessage}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun launchDirections(destLat: Double, destLng: Double) {
+        val gmmIntentUri = Uri.parse("google.navigation:q=$destLat,$destLng")
+        val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri).apply {
+            setPackage("com.google.android.apps.maps")
+        }
+        try {
+            context.startActivity(mapIntent)
+        } catch (e: Exception) {
+            val webUri = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$destLat,$destLng")
+            val webIntent = Intent(Intent.ACTION_VIEW, webUri)
+            try {
+                context.startActivity(webIntent)
+            } catch (ex: Exception) {
+                Toast.makeText(context, "Could not open directions: ${ex.localizedMessage}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // Automatically trigger launch of Google Maps on entering the section
+    LaunchedEffect(Unit) {
+        val currentLat = liveLocation?.latitude ?: 37.7749
+        val currentLng = liveLocation?.longitude ?: -122.4194
+        launchGoogleMapsApp(currentLat, currentLng)
+    }
+
+    // Prepackaged Safe Haven locations
     val allPlaces = remember(liveLocation) {
         val currentLat = liveLocation?.latitude ?: 37.7749
         val currentLng = liveLocation?.longitude ?: -122.4194
         listOf(
-            MapPlace("My Current Location", currentLat, currentLng, 0.25f, 0.45f, "Place", "Coordinates based on GPS"),
-            MapPlace("Central Station", 37.7801, -122.4120, 0.15f, 0.15f, "Place", "Transit hub, high foot traffic"),
-            MapPlace("Downtown Plaza", 37.7725, -122.4080, 0.55f, 0.48f, "Place", "Commercial shopping corridor"),
-            MapPlace("Tech Park Campus", 37.7650, -122.4250, 0.22f, 0.78f, "Place", "Offices and research facility"),
-            MapPlace("Grand Library", 37.7780, -122.4180, 0.42f, 0.28f, "Place", "Public civic center square"),
-            MapPlace("SafeHer HQ", 37.7710, -122.4210, 0.35f, 0.62f, "Place", "Community security office"),
-            MapPlace("Metro Crossing", 37.7610, -122.4150, 0.75f, 0.85f, "Place", "Subway platform, illuminated 24/7"),
-            MapPlace("Oakwood Apartments", 37.7850, -122.4280, 0.82f, 0.12f, "Place", "Residential family zone"),
-            
-            // Emergencies
             MapPlace("Northern Police Precinct", 37.7830, -122.4220, 0.62f, 0.22f, "Police", "Municipal Police Department (Station 4)"),
             MapPlace("Central Police Station", 37.7712, -122.4100, 0.48f, 0.68f, "Police", "Safety hub & precinct HQ"),
             MapPlace("Saint Jude Hospital", 37.7615, -122.4225, 0.28f, 0.88f, "Hospital", "24-Hour emergency unit & trauma center"),
@@ -1873,51 +1875,38 @@ fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
         )
     }
 
-    val unsafeZones = remember {
-        listOf(
-            UnsafeZone("Dimly-lit Alleyway", "Low municipal lighting and active construction zones", 0.48f, 0.38f, 0.10f),
-            UnsafeZone("Industrial Warehouse Zone", "Deserted commercial sector with low security presence", 0.68f, 0.70f, 0.12f)
-        )
-    }
-
     var searchQuery by remember { mutableStateOf("") }
-    var startPlace by remember { mutableStateOf(allPlaces[0]) } // Current Location
-    var endPlace by remember { mutableStateOf(allPlaces[2]) } // Downtown Plaza
-    var avoidUnsafe by remember { mutableStateOf(true) }
-    var activeFilter by remember { mutableStateOf("ALL") } // "ALL", "POLICE", "HOSPITAL", "HAVEN"
-    var selectedLandmark by remember { mutableStateOf<MapPlace?>(null) }
-    var showSearchResults by remember { mutableStateOf(false) }
-
-    LaunchedEffect(liveLocation) {
-        if (startPlace.name == "My Current Location") {
-            startPlace = allPlaces[0]
-        }
-    }
-
-    val filteredPlaces = remember(activeFilter, allPlaces) {
-        if (activeFilter == "ALL") allPlaces
+    val filteredPlaces = remember(searchQuery) {
+        if (searchQuery.isBlank()) allPlaces
         else allPlaces.filter { 
-            when (activeFilter) {
-                "POLICE" -> it.category == "Police"
-                "HOSPITAL" -> it.category == "Hospital"
-                "HAVEN" -> it.category == "Safe Haven"
-                else -> true
-            }
-        }
-    }
-
-    val searchResults = remember(searchQuery, allPlaces) {
-        if (searchQuery.isBlank()) emptyList()
-        else {
-            allPlaces.filter { 
-                it.name.contains(searchQuery, ignoreCase = true) || 
-                it.category.contains(searchQuery, ignoreCase = true) ||
-                it.address.contains(searchQuery, ignoreCase = true)
-            }
+            it.name.contains(searchQuery, ignoreCase = true) || 
+            it.category.contains(searchQuery, ignoreCase = true) ||
+            it.address.contains(searchQuery, ignoreCase = true)
         }
     }
 
     val scrollState = rememberScrollState()
+
+    // Pulse animations for the Live Redirect status badge
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseAlpha"
+    )
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.8f,
+        targetValue = 1.2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseScale"
+    )
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -1927,617 +1916,206 @@ fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-        // Core Header Label
-        Column {
-            Text(
-                text = "Safe Route Planner",
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 20.sp,
-                color = MaterialTheme.colorScheme.onBackground
-            )
-            Text(
-                text = "Smart mapping engine that safeguards your commute by routing around high-risk zones.",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        // 1. Search Bar Interface
-        Box(modifier = Modifier.fillMaxWidth()) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { 
-                    searchQuery = it
-                    showSearchResults = it.isNotEmpty()
-                },
-                placeholder = { Text("Search location, hospital or precinct...", fontSize = 13.sp) },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search icon", modifier = Modifier.size(20.dp)) },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { 
-                            searchQuery = "" 
-                            showSearchResults = false
-                        }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear search", modifier = Modifier.size(18.dp))
-                        }
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("map_search_bar"),
-                singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = CrimsonAlert,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
-                    focusedContainerColor = MaterialTheme.colorScheme.surface,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface
+            // Header Title
+            Column {
+                Text(
+                    text = "SafeHer GPS Gateway",
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 22.sp,
+                    color = MaterialTheme.colorScheme.onBackground
                 )
-            )
+                Text(
+                    text = "Automatic map integration that seamlessly connects with Google Maps on your phone for full security features.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
 
-            // Auto-complete dropdown list
-            if (showSearchResults && searchResults.isNotEmpty()) {
-                Card(
+            // Status Card (Auto-Redirect Indicator)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
+            ) {
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 62.dp)
-                        .heightIn(max = 200.dp)
-                        .align(Alignment.TopCenter),
-                    shape = RoundedCornerShape(12.dp),
-                    elevation = CardDefaults.cardElevation(8.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
-                ) {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxWidth().padding(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        items(searchResults) { place ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        endPlace = place
-                                        searchQuery = ""
-                                        showSearchResults = false
-                                        selectedLandmark = place
-                                        Toast.makeText(context, "Set destination to ${place.name}", Toast.LENGTH_SHORT).show()
-                                    }
-                                    .padding(10.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = when (place.category) {
-                                        "Police" -> Icons.Default.LocalPolice
-                                        "Hospital" -> Icons.Default.LocalHospital
-                                        "Safe Haven" -> Icons.Default.Shield
-                                        else -> Icons.Default.LocationOn
-                                    },
-                                    tint = when (place.category) {
-                                        "Police" -> Color(0xFF1E88E5)
-                                        "Hospital" -> Color(0xFFE53935)
-                                        "Safe Haven" -> Color(0xFF8E24AA)
-                                        else -> MaterialTheme.colorScheme.secondary
-                                    },
-                                    contentDescription = "Search Result Type",
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Column {
-                                    Text(place.name, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                                    Text(place.address, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.06f))
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Routing Controller Configuration Card
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
-        ) {
-            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // Dropdowns or selectors for Start & End
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Box(modifier = Modifier.size(8.dp).background(SafeEmerald, CircleShape))
-                            Text("Start Destination", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        
-                        var startExpanded by remember { mutableStateOf(false) }
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f))
-                                    .clickable { startExpanded = true }
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(startPlace.name, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Icon(Icons.Default.ArrowDropDown, contentDescription = "Dropdown indicators", modifier = Modifier.size(16.dp))
-                            }
-                            DropdownMenu(
-                                expanded = startExpanded,
-                                onDismissRequest = { startExpanded = false }
-                            ) {
-                                allPlaces.filter { it.category == "Place" }.forEach { place ->
-                                    DropdownMenuItem(
-                                        text = { Text(place.name, fontSize = 11.sp) },
-                                        onClick = {
-                                            startPlace = place
-                                            startExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.Bottom)
-                            .padding(bottom = 6.dp)
-                    ) {
-                        IconButton(
-                            onClick = {
-                                val temp = startPlace
-                                startPlace = endPlace
-                                endPlace = temp
-                            },
-                            modifier = Modifier.size(34.dp).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f), CircleShape)
-                        ) {
-                            Icon(Icons.Default.SwapVert, contentDescription = "Swap Locations", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
-                        }
-                    }
-
-                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Box(modifier = Modifier.size(8.dp).background(CrimsonAlert, CircleShape))
-                            Text("End Destination", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-
-                        var endExpanded by remember { mutableStateOf(false) }
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f))
-                                    .clickable { endExpanded = true }
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(endPlace.name, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Icon(Icons.Default.ArrowDropDown, contentDescription = "Dropdown indices", modifier = Modifier.size(16.dp))
-                            }
-                            DropdownMenu(
-                                expanded = endExpanded,
-                                onDismissRequest = { endExpanded = false }
-                            ) {
-                                allPlaces.forEach { place ->
-                                    DropdownMenuItem(
-                                        text = { Text(place.name, fontSize = 11.sp) },
-                                        onClick = {
-                                            endPlace = place
-                                            endExpanded = false
-                                            selectedLandmark = place
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.06f))
-
-                // Toggle "Avoid Unsafe Routes"
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
+                        .padding(16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Shield,
-                            contentDescription = "Safe Shield Icon",
-                            tint = if (avoidUnsafe) SafeEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Column {
-                            Text("Avoid High-Risk Zones", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
-                            Text("Auto detour around dimly-lit alleys or unmonitored spots", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .scale(pulseScale)
+                                    .drawBehind {
+                                        drawCircle(
+                                            color = SafeEmerald.copy(alpha = pulseAlpha),
+                                            radius = size.minDimension / 2
+                                        )
+                                    }
+                            )
+                            Text(
+                                text = "Auto-Redirection Connected",
+                                color = SafeEmerald,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
                         }
-                    }
-                    Switch(
-                        checked = avoidUnsafe,
-                        onCheckedChange = { avoidUnsafe = it },
-                        modifier = Modifier.testTag("avoid_unsafe_switch")
-                    )
-                }
-            }
-        }
-
-        // 3. Emergency Filters Row Panel
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                text = "Nearby Safety Anchors",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf("ALL", "POLICE", "HOSPITAL", "HAVEN").forEach { category ->
-                    val isSelected = activeFilter == category
-                    val label = when (category) {
-                        "ALL" -> "Show All Assets"
-                        "POLICE" -> "Police Hubs"
-                        "HOSPITAL" -> "24h Hospitals"
-                        "HAVEN" -> "Safe Havens"
-                        else -> category
-                    }
-                    val icon = when (category) {
-                        "POLICE" -> Icons.Default.LocalPolice
-                        "HOSPITAL" -> Icons.Default.LocalHospital
-                        "HAVEN" -> Icons.Default.Shield
-                        else -> Icons.Default.Map
+                        Text(
+                            text = "Google Maps has been opened automatically. If it was closed or hidden, you can launch it manually anytime.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 15.sp
+                        )
                     }
                     
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = { activeFilter = category },
-                        leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp)) },
-                        label = { Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = if (category == "POLICE") Color(0xFF1976D2) else if (category == "HOSPITAL") CrimsonAlert else Color(0xFF8E24AA),
-                            selectedLabelColor = Color.White,
-                            selectedLeadingIconColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+
+                    Button(
+                        onClick = {
+                            val currentLat = liveLocation?.latitude ?: 37.7749
+                            val currentLng = liveLocation?.longitude ?: -122.4194
+                            launchGoogleMapsApp(currentLat, currentLng)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Map, contentDescription = "Open Maps app", modifier = Modifier.size(16.dp))
+                            Text("Launch app", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
-        }
 
-        // Calculate dynamic routing details
-        val matchedPath = remember(startPlace, endPlace, avoidUnsafe) {
-            calculatePath(startPlace, endPlace, avoidUnsafe, unsafeZones)
-        }
-
-        // Check if direct path crosses unsafe
-        val crossesUnsafeDirect = remember(startPlace, endPlace) {
-            unsafeZones.any { zone ->
-                getDistanceToSegment(zone.x, zone.y, startPlace.x, startPlace.y, endPlace.x, endPlace.y) < zone.radius
+            // Quick Search Section
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Quick Map Search Pre-keys",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val searchHotkeys = listOf(
+                        Triple("Police Stations", "police stations", Icons.Default.LocalPolice),
+                        Triple("Hospitals", "emergency hospitals", Icons.Default.LocalHospital),
+                        Triple("Safe Havens", "community centers shelters", Icons.Default.Shield)
+                    )
+                    
+                    searchHotkeys.forEach { hotkey ->
+                        FilterChip(
+                            selected = false,
+                            onClick = {
+                                val currentLat = liveLocation?.latitude ?: 37.7749
+                                val currentLng = liveLocation?.longitude ?: -122.4194
+                                launchGoogleMapsApp(currentLat, currentLng, hotkey.second)
+                            },
+                            label = { Text(hotkey.first, fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                            leadingIcon = { Icon(hotkey.third, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = MaterialTheme.colorScheme.surface,
+                                labelColor = MaterialTheme.colorScheme.onSurface
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                    }
+                }
             }
-        }
 
-        // Base math distances
-        val directDist = remember(startPlace, endPlace) {
-            val dX = endPlace.x - startPlace.x
-            val dY = endPlace.y - startPlace.y
-            Math.sqrt((dX * dX + dY * dY).toDouble()).toFloat() * 4.2f
-        }
+            // Safe Haven Directory List & Search Input
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Emergency Safety Anchors Map Directory",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-        val finalDist = remember(matchedPath) {
-            var total = 0f
-            for (i in 0 until matchedPath.size - 1) {
-                val p1 = matchedPath[i]
-                val p2 = matchedPath[i+1]
-                val len = Math.sqrt(((p2.first - p1.first) * (p2.first - p1.first) + (p2.second - p1.second) * (p2.second - p1.second)).toDouble()).toFloat()
-                total += len * 4.2f
-            }
-            total
-        }
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Filter directory by name or category...", fontSize = 12.sp) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search", modifier = Modifier.size(18.dp)) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear", modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("map_search_bar"),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CrimsonAlert,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
 
-        // ETA mapping
-        // walking is 12m per km
-        val minutesETA = Math.round(finalDist * 12.0f)
-        val directMinutesETA = Math.round(directDist * 12.0f)
-
-        // 4. THE INTERACTIVE CONTAINER MAP
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.1f), RoundedCornerShape(24.dp)),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
-        ) {
-            Column {
-                if (!hasLocationPermission) {
+                if (filteredPlaces.isEmpty()) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(300.dp)
-                            .background(Color(0xFF141416))
                             .padding(24.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Icon(Icons.Default.LocationOff, contentDescription = "Location disabled", tint = CrimsonAlert, modifier = Modifier.size(48.dp))
-                            Text("Location Permission Needed", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color.White)
-                            Text(
-                                "SafeHer needs location permission to show your live position and keep you safe.",
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center,
-                                color = TextSecondary
-                            )
-                            Button(
-                                onClick = {
-                                    permissionLauncher.launch(
-                                        arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION)
-                                    )
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert)
-                            ) {
-                                Text("Enable Location", fontWeight = FontWeight.Bold, color = Color.White)
-                            }
-                        }
+                        Text("No matching emergency locations found.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                 } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(300.dp)
-                            .background(Color(0xFF141416))
-                            .clip(RoundedCornerShape(24.dp))
-                    ) {
-                        val osmStyleJson = remember {
-                            """
-                            {
-                              "version": 8,
-                              "sources": {
-                                "osm": {
-                                  "type": "raster",
-                                  "tiles": [
-                                    "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                                    "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                                    "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                                  ],
-                                  "tileSize": 256,
-                                  "attribution": "© OpenStreetMap contributors"
-                                }
-                              },
-                              "layers": [
-                                {
-                                  "id": "osm",
-                                  "type": "raster",
-                                  "source": "osm",
-                                  "minzoom": 0,
-                                  "maxzoom": 19
-                                }
-                              ]
-                            }
-                            """.trimIndent()
+                    filteredPlaces.forEach { place ->
+                        val themeColor = when (place.category) {
+                            "Police" -> Color(0xFF1E88E5)
+                            "Hospital" -> Color(0xFFE53935)
+                            "Safe Haven" -> Color(0xFF8E24AA)
+                            else -> SafeEmerald
                         }
-
-                        val mapLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
-                        val mapView = remember {
-                            org.maplibre.android.maps.MapView(context).apply {
-                                getMapAsync { mapboxMap ->
-                                    mapboxMap.setStyle(org.maplibre.android.maps.Style.Builder().fromJson(osmStyleJson))
-                                }
-                            }
-                        }
-
-                        DisposableEffect(mapLifecycle, mapView) {
-                            val observer = LifecycleEventObserver { _, event ->
-                                try {
-                                    when (event) {
-                                        Lifecycle.Event.ON_CREATE -> mapView.onCreate(null)
-                                        Lifecycle.Event.ON_START -> mapView.onStart()
-                                        Lifecycle.Event.ON_RESUME -> mapView.onResume()
-                                        Lifecycle.Event.ON_PAUSE -> mapView.onPause()
-                                        Lifecycle.Event.ON_STOP -> mapView.onStop()
-                                        Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
-                                        else -> {}
-                                    }
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
-                            mapLifecycle.addObserver(observer)
-                            onDispose {
-                                try {
-                                    mapLifecycle.removeObserver(observer)
-                                    mapView.onDestroy()
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
-                        }
-
-                        var mapboxMapRef by remember { mutableStateOf<org.maplibre.android.maps.MapLibreMap?>(null) }
-
-                        AndroidView(
-                            factory = { mapView },
-                            modifier = Modifier.fillMaxSize()
-                        ) { view ->
-                            view.getMapAsync { map ->
-                                if (mapboxMapRef != map) {
-                                    mapboxMapRef = map
-                                    map.uiSettings.setZoomGesturesEnabled(true)
-                                    map.uiSettings.setCompassEnabled(true)
-                                    map.uiSettings.setLogoEnabled(false)
-                                    map.uiSettings.setAttributionEnabled(false)
-                                }
-                            }
-                        }
-
-                        LaunchedEffect(
-                            mapboxMapRef,
-                            filteredPlaces,
-                            startPlace,
-                            endPlace,
-                            matchedPath,
-                            avoidUnsafe,
-                            crossesUnsafeDirect
+                        
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.08f)),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                         ) {
-                            val map = mapboxMapRef ?: return@LaunchedEffect
-                            val style = map.style
-                            val triggerRedraw: (org.maplibre.android.maps.Style) -> Unit = { _ ->
-                                map.clear()
-
-                                // 1. Draw unsafe zones
-                                unsafeZones.forEach { zone ->
-                                    val centerLat = 37.7880 - (zone.y * 0.0300)
-                                    val centerLng = -122.4350 + (zone.x * 0.0350)
-                                    val circleCoords = getCirclePoints(centerLat, centerLng, zone.radius.toDouble() * 3100.0)
-
-                                    map.addPolygon(
-                                        org.maplibre.android.annotations.PolygonOptions()
-                                            .addAll(circleCoords)
-                                            .fillColor(android.graphics.Color.parseColor("#33B3261E"))
-                                    )
-                                    map.addPolyline(
-                                        org.maplibre.android.annotations.PolylineOptions()
-                                            .addAll(circleCoords)
-                                            .color(android.graphics.Color.parseColor("#99B3261E"))
-                                            .width(1.5f)
-                                    )
-                                }
-
-                                // 2. Draw direct (unsafe connection) path
-                                if (crossesUnsafeDirect) {
-                                    val directCoords = listOf(
-                                        org.maplibre.android.geometry.LatLng(startPlace.lat, startPlace.lng),
-                                        org.maplibre.android.geometry.LatLng(endPlace.lat, endPlace.lng)
-                                    )
-                                    map.addPolyline(
-                                        org.maplibre.android.annotations.PolylineOptions()
-                                            .addAll(directCoords)
-                                            .color(android.graphics.Color.parseColor("#66B3261E"))
-                                            .width(2.5f)
-                                    )
-                                }
-
-                                // 3. Draw safe smart routing matched path
-                                val pathCoords = matchedPath.map { p ->
-                                    org.maplibre.android.geometry.LatLng(
-                                        37.7880 - (p.second * 0.0300),
-                                        -122.4350 + (p.first * 0.0350)
-                                    )
-                                }
-                                val pathColorHex = if (avoidUnsafe) "#4CAF50" else "#FFA726"
-                                map.addPolyline(
-                                    org.maplibre.android.annotations.PolylineOptions()
-                                        .addAll(pathCoords)
-                                        .color(android.graphics.Color.parseColor(pathColorHex))
-                                        .width(5f)
-                                )
-
-                                // 4. Draw marker overlays of places
-                                filteredPlaces.forEach { place ->
-                                    val isStart = place.name == startPlace.name
-                                    val isEnd = place.name == endPlace.name
-
-                                    val markerColorHex = when {
-                                        isStart -> "#4CAF50"
-                                        isEnd -> "#B3261E"
-                                        place.category == "Police" -> "#1E88E5"
-                                        place.category == "Hospital" -> "#E53935"
-                                        place.category == "Safe Haven" -> "#8E24AA"
-                                        else -> "#FFA726"
-                                    }
-
-                                    val coloredIcon = createColoredMarkerIcon(context, android.graphics.Color.parseColor(markerColorHex))
-                                    map.addMarker(
-                                        org.maplibre.android.annotations.MarkerOptions()
-                                            .position(org.maplibre.android.geometry.LatLng(place.lat, place.lng))
-                                            .title(place.name)
-                                            .snippet(place.address)
-                                            .icon(coloredIcon)
-                                    )
-                                }
-
-                                map.setOnMarkerClickListener { marker ->
-                                    val clickedPlace = filteredPlaces.find { it.name == marker.title }
-                                    if (clickedPlace != null) {
-                                        selectedLandmark = clickedPlace
-                                    }
-                                    true
-                                }
-                            }
-
-                            if (style != null && style.isFullyLoaded) {
-                                triggerRedraw(style)
-                            } else {
-                                map.setStyle(org.maplibre.android.maps.Style.Builder().fromJson(osmStyleJson)) { styleObj ->
-                                    triggerRedraw(styleObj)
-                                }
-                            }
-                        }
-
-                        LaunchedEffect(selectedLandmark, mapboxMapRef) {
-                            val map = mapboxMapRef ?: return@LaunchedEffect
-                            selectedLandmark?.let { landmark ->
-                                map.animateCamera(
-                                    org.maplibre.android.camera.CameraUpdateFactory.newLatLngZoom(
-                                        org.maplibre.android.geometry.LatLng(landmark.lat, landmark.lng),
-                                        14.5
-                                    ),
-                                    1200
-                                )
-                            }
-                        }
-
-                        LaunchedEffect(startPlace, mapboxMapRef) {
-                            val map = mapboxMapRef ?: return@LaunchedEffect
-                            if (selectedLandmark == null) {
-                                map.animateCamera(
-                                    org.maplibre.android.camera.CameraUpdateFactory.newLatLngZoom(
-                                        org.maplibre.android.geometry.LatLng(startPlace.lat, startPlace.lng),
-                                        13.2
-                                    ),
-                                    1200
-                                )
-                            }
-                        }
-
-                        selectedLandmark?.let { place ->
-                            Box(
+                            Row(
                                 modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .padding(bottom = 12.dp)
-                                    .fillMaxWidth(0.9f)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(Color(0xE61E1E22))
-                                    .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f), RoundedCornerShape(14.dp))
-                                    .padding(12.dp)
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(
+                                        color = themeColor.copy(alpha = 0.12f),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.size(36.dp)
                                     ) {
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Box(contentAlignment = Alignment.Center) {
                                             Icon(
                                                 imageVector = when (place.category) {
                                                     "Police" -> Icons.Default.LocalPolice
@@ -2545,33 +2123,36 @@ fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
                                                     "Safe Haven" -> Icons.Default.Shield
                                                     else -> Icons.Default.Place
                                                 },
-                                                contentDescription = "Landmark Type Icon",
-                                                tint = when (place.category) {
-                                                    "Police" -> Color(0xFF1E88E5)
-                                                    "Hospital" -> Color(0xFFE53935)
-                                                    "Safe Haven" -> Color(0xFF8E24AA)
-                                                    else -> SafeEmerald
-                                                },
-                                                modifier = Modifier.size(16.dp)
+                                                contentDescription = place.category,
+                                                tint = themeColor,
+                                                modifier = Modifier.size(18.dp)
                                             )
+                                        }
+                                    }
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
                                             Text(
-                                                place.name,
-                                                fontWeight = FontWeight.ExtraBold,
+                                                text = place.name,
+                                                fontWeight = FontWeight.Bold,
                                                 fontSize = 12.sp,
-                                                color = Color.White,
+                                                color = MaterialTheme.colorScheme.onSurface,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         }
-                                        
+                                        Text(
+                                            text = place.address,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                         Badge(
-                                            containerColor = when (place.category) {
-                                                "Police" -> Color(0xFF1E88E5).copy(alpha = 0.15f)
-                                                "Hospital" -> Color(0xFFE53935).copy(alpha = 0.15f)
-                                                "Safe Haven" -> Color(0xFF8E24AA).copy(alpha = 0.15f)
-                                                else -> Color.White.copy(alpha = 0.12f)
-                                            },
-                                            contentColor = Color.White
+                                            containerColor = themeColor.copy(alpha = 0.15f),
+                                            contentColor = themeColor
                                         ) {
                                             Text(
                                                 text = place.category.uppercase(),
@@ -2581,211 +2162,57 @@ fun SafeMapScreen(viewModel: SafetyViewModel, modifier: Modifier = Modifier) {
                                             )
                                         }
                                     }
+                                }
 
-                                    Text(
-                                        text = place.address,
-                                        fontSize = 10.sp,
-                                        color = Color.White.copy(alpha = 0.7f)
-                                    )
+                                Spacer(modifier = Modifier.width(8.dp))
 
-                                    Spacer(modifier = Modifier.height(4.dp))
-
+                                Button(
+                                    onClick = { launchDirections(place.lat, place.lng) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = themeColor),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
                                     Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        val safetyScore = when (place.category) {
-                                            "Police", "Hospital" -> "100% Secure"
-                                            "Safe Haven" -> "95% Safe"
-                                            else -> "90% Safe"
-                                        }
-                                        Text(
-                                            text = "⚡ Security Index: $safetyScore",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = SafeEmerald
-                                        )
-
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            TextButton(
-                                                onClick = { selectedLandmark = null },
-                                                contentPadding = PaddingValues(0.dp)
-                                            ) {
-                                                Text("Dismiss", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
-                                            }
-
-                                            Button(
-                                                onClick = {
-                                                    endPlace = place
-                                                    Toast.makeText(context, "Route planned to ${place.name}", Toast.LENGTH_SHORT).show()
-                                                },
-                                                shape = RoundedCornerShape(8.dp),
-                                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
-                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                                modifier = Modifier.height(28.dp)
-                                            ) {
-                                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                    Icon(Icons.Default.Navigation, contentDescription = null, tint = Color.White, modifier = Modifier.size(10.dp))
-                                                    Text("GO HERE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                                }
-                                            }
-                                        }
+                                        Icon(Icons.Default.Navigation, contentDescription = "Navigate to destination", tint = Color.White, modifier = Modifier.size(12.dp))
+                                        Text("Go", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
 
-                // 5. LIVE NAVIGATION SUMMARY & ETA FOOTER CONTROL
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surface)
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Icon(
-                                    imageVector = if (avoidUnsafe) Icons.Default.CheckCircle else Icons.Default.Info,
-                                    contentDescription = "Status",
-                                    tint = if (avoidUnsafe) SafeEmerald else Color(0xFFFBC02D),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = if (avoidUnsafe) "Bespoke Safe Corridor Active" else "Direct Mode Route Plot",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                            
-                            Text(
-                                text = "Commute from ${startPlace.name} to ${endPlace.name}",
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        // Display computed parameters
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                text = "${minutesETA} mins",
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (avoidUnsafe) SafeEmerald else Color(0xFFFFA726)
-                            )
-                            Text(
-                                text = String.format(Locale.US, "Est. Distance: %.2f km", finalDist),
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    // Direct comparison disclaimer
-                    if (avoidUnsafe && crossesUnsafeDirect) {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = SafeEmerald.copy(alpha = 0.08f),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, SafeEmerald.copy(alpha = 0.2f))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(10.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.Shield, contentDescription = "Safe Shield logo", tint = SafeEmerald, modifier = Modifier.size(16.dp))
-                                Text(
-                                    text = "Smart reroute adds +${minutesETA - directMinutesETA} mins to completely avoid dimly lit alleys.",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = SafeEmerald,
-                                    lineHeight = 14.sp
-                                )
-                            }
-                        }
-                    } else if (crossesUnsafeDirect) {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = CrimsonAlert.copy(alpha = 0.08f),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, CrimsonAlert.copy(alpha = 0.2f))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(10.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.Warning, contentDescription = "Hazard Indicator", tint = CrimsonAlert, modifier = Modifier.size(16.dp))
-                                Text(
-                                    text = "Warning: Direct path crosses 1+ active hazard zone(s). Turn on safety filters to bypass threat corridors safely.",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = CrimsonAlert,
-                                    lineHeight = 14.sp
-                                )
-                            }
-                        }
-                    } else {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.03f),
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(10.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.CheckCircle, contentDescription = "Passed check", tint = SafeEmerald, modifier = Modifier.size(16.dp))
-                                Text(
-                                    text = "Excellent: Your calculated route is clean and avoids all known urban threat corridors.",
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    lineHeight = 14.sp
-                                )
-                            }
-                        }
-                    }
-                }
+        // Floating SOS Alert Button (Overlayed beautifully at the bottom-right corner)
+        FloatingActionButton(
+            onClick = { viewModel.triggerSOS() },
+            containerColor = CrimsonAlert,
+            contentColor = Color.White,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(24.dp)
+                .testTag("floating_sos_button"),
+            shape = CircleShape
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Warning,
+                    contentDescription = "Trigger Emergency SOS",
+                    modifier = Modifier.size(24.dp)
+                )
+                Text("SOS", fontWeight = FontWeight.Bold, fontSize = 16.sp)
             }
         }
     }
-
-    // Floating SOS Alert Button (Overlayed beautifully at the bottom-right corner)
-    FloatingActionButton(
-        onClick = { viewModel.triggerSOS() },
-        containerColor = CrimsonAlert,
-        contentColor = Color.White,
-        modifier = Modifier
-            .align(Alignment.BottomEnd)
-            .padding(24.dp)
-            .testTag("floating_sos_button"),
-        shape = CircleShape
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Warning,
-                contentDescription = "Trigger Emergency SOS",
-                modifier = Modifier.size(24.dp)
-            )
-            Text("SOS", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        }
-    }
-}
 }
 
 // Support Theme Helper
